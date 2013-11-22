@@ -51,7 +51,51 @@
 ;;;     (letrec ([x* e*] ...) body* ... body)
 ;;;     (set! x e)
 ;;;     (e e* ...)))
-
+;;;
+;;; The following exports are defined for this library:
+;;;
+;;; (my-tiny-compile <exp>)
+;;;     my-tiny-compile is the main interface the compiler, where <exp> is
+;;;     a quoted expression for the compiler to evaluate.  This procedure will
+;;;     run the nanopass parts of the compiler, produce a C output file in t.c,
+;;;     compile it using gcc to a program t, run the program t, directing its
+;;;     output to t.out, and finally use the Scheme reader to read t.out and
+;;;     return the value to the host Scheme system.  For example, if we wanted
+;;;     to run a program that calculates the factorial of 5, we could do the 
+;;;     following:
+;;;     (my-tiny-compile '(letrec ([f (lambda (n)
+;;;                                     (if (= n 0)
+;;;                                         1
+;;;                                         (* n (f (- n 1)))))])
+;;;                         (f 10)))
+;;;
+;;; (trace-passes)
+;;; (trace-passes <pass-spec>)
+;;;     trace-passes is a parameter used by my-tiny-compile to decide what
+;;;     passees should have their output printed.  When it is called without
+;;;     any arguments, it returns the list of passes to be traced.  When it
+;;;     is called with an argument, the argument should be one of the
+;;;     following:
+;;;     '<pass-name>                       - sets this pass to be traced
+;;;     '(<pass-name 0> <pass-name 1> ...) - set the list of passes to trace
+;;;     #t                                 - traces all passes
+;;;     #f                                 - turns off trace passing
+;;;
+;;; all-passes
+;;;     lists all passes in the compiler.
+;;;
+;;; (use-boehm?)
+;;; (use-boehm? <boolean>)
+;;;     use-boehm? is a parameter that indicates if the generated C code should
+;;;     attempt to use the boehm garbage collector.  This feature is, as of
+;;;     yet, untested.
+;;;
+;;; Internals that are exported to make them available for programmers
+;;; experimenting with the compiler.
+;;;
+;;; TBD
+;;;
+;;;
 (library (c)
   (export
     Lsrc unparse-Lsrc
@@ -74,16 +118,44 @@
     L17 unparse-L17
     L18 unparse-L18
     L19 unparse-L19
-    L20 unparse-L20
+    ; L20 unparse-L20
     L21 unparse-L21
     L22 unparse-L22
 
     unique-var
-    primitive-map
+
+    user-alloc-value-prims
+    user-non-alloc-value-prims
+    user-pred-prims
+    user-effect-prims
+    user-prims
+    void+user-non-alloc-value-prims
+    void+user-prims
+    closure+user-alloc-value-prims
+    closure+void+user-non-alloc-value-prims
+    closure+user-effect-prims
+    internal+closure+user-effect-prims
+    closure+void+user-prims
+
     primitive?
+    void+primitive?
+    closure+void+primitive?
+    effect-free-prim?
+    predicate-primitive?
+    effect-primitive?
+    value-primitive?
+    non-alloc-value-primitive?
+    effect+internal-primitive?
+
     target-fixnum?
     constant?
     datum?
+    integer-64?
+
+    set-cons
+    union
+    difference
+    intersect
 
     parse-and-rename
     remove-one-armed-if
@@ -108,7 +180,7 @@
     expose-allocation-primitives
     return-of-set!
     flatten-set!
-    push-if
+    ; push-if
     specify-constant-representation
     expand-primitives
     generate-c
@@ -177,76 +249,173 @@
           (set! count (+ count 1))
           (string->symbol
             (string-append (symbol->string name) "." (number->string c)))))))
+            
+  ;;; Convenience procedure for building temporaries in the compiler.
   (define make-tmp (lambda () (unique-var 't)))
 
   ;;; Helpers for the various sets of primitives we have over the course of the
   ;;; compiler
-  ;;; TODO: we shoould clean this up so there is less redundancy here.
-  (define primitive-map
-    '((car . 1) (cdr . 1) (cons . 2) (pair? . 1) (null? . 1) (boolean? . 1)
-       (make-vector . 1) (vector-ref . 2) (vector-length . 1)
-       (vector-set! . 3) (vector? . 1) (box . 1) (unbox . 1) (box-set! . 2)
-       (box? . 1) (+ . 2) (- . 2) (* . 2) (/ . 2) (= . 2) (< . 2) (<= . 2)
-       (> . 2) (>= . 2) (eq? . 2)))
+  ;;; All primitives:
+  ;;;
+  ;;;                     |       |         | Langauge   | Language |
+  ;;; primitive           | arity | context | introduced | removed  |
+  ;;; --------------------+-------+---------+------------+----------+
+  ;;; cons                |   2   |  value  |    Lsrc    |    L17   |
+  ;;; make-vector         |   1   |  value  |    Lsrc    |    L17   |
+  ;;; box                 |   1   |  value  |    Lsrc    |    L17   |
+  ;;; car                 |   1   |  value  |    Lsrc    |    L22   |
+  ;;; cdr                 |   1   |  value  |    Lsrc    |    L22   |
+  ;;; vector-ref          |   2   |  value  |    Lsrc    |    L22   |
+  ;;; vector-length       |   1   |  value  |    Lsrc    |    L22   |
+  ;;; unbox               |   1   |  value  |    Lsrc    |    L22   |
+  ;;; +                   |   2   |  value  |    Lsrc    |    L22   |
+  ;;; -                   |   2   |  value  |    Lsrc    |    L22   |
+  ;;; *                   |   2   |  value  |    Lsrc    |    L22   |
+  ;;; /                   |   2   |  value  |    Lsrc    |    L22   |
+  ;;; pair?               |   1   |  pred   |    Lsrc    |    L22   |
+  ;;; null?               |   1   |  pred   |    Lsrc    |    L22   |
+  ;;; boolean?            |   1   |  pred   |    Lsrc    |    L22   |
+  ;;; vector?             |   1   |  pred   |    Lsrc    |    L22   |
+  ;;; box?                |   1   |  pred   |    Lsrc    |    L22   |
+  ;;; =                   |   2   |  pred   |    Lsrc    |    L22   |
+  ;;; <                   |   2   |  pred   |    Lsrc    |    L22   |
+  ;;; <=                  |   2   |  pred   |    Lsrc    |    L22   |
+  ;;; >                   |   2   |  pred   |    Lsrc    |    L22   |
+  ;;; >=                  |   2   |  pred   |    Lsrc    |    L22   |
+  ;;; eq?                 |   2   |  pred   |    Lsrc    |    L22   |
+  ;;; vector-set!         |   3   |  effect |    Lsrc    |    L22   |
+  ;;; box-set!            |   2   |  effect |    Lsrc    |    L22   |
+  ;;; --------------------+-------+---------+------------+----------+
+  ;;; void                |   0   |  value  |    L1      |    L22   |
+  ;;; --------------------+-------+---------+------------+----------+
+  ;;; make-closure        |   1   |  value  |    L13     |    L17   |
+  ;;; closure-code        |   2   |  value  |    L13     |    L22   |
+  ;;; closure-ref         |   2   |  value  |    L13     |    L22   |
+  ;;; closure-code-set!   |   2   |  effect |    L13     |    L22   |
+  ;;; closure-data-set!   |   3   |  effect |    L13     |    L22   |
+  ;;; --------------------+-------+---------+------------+----------+
+  ;;; $vector-length-set! |   2   |  effect |    L17     |    L22   |
+  ;;; $set-car!           |   2   |  effect |    L17     |    L22   |
+  ;;; $set-cdr!           |   2   |  effect |    L17     |    L22   |
+  ;;;
+  ;;; This is a slightly cleaned up version, but this might still be better
+  ;;; cleaned up by adding a define-primitives form, perhaps even one that can
+  ;;; be used in the later parts of the compiler.
 
-  (define extended-primitive-map
-    (cons '(void . 0) primitive-map))
+  ;;; user value primitives that perform allocation
+  (define user-alloc-value-prims
+    '((cons . 2) (make-vector . 1) (box . 1)))
 
-  (define extended+closure-primitive-map
+  ;;; user value primitives that do not perform allocation
+  (define user-non-alloc-value-prims
+    '((car . 1) (cdr . 1) (vector-ref . 2) (vector-length . 1) (unbox . 1)
+      (+ . 2) (- . 2) (* . 2) (/ . 2)))
+
+  ;;; user predicate primitives
+  ;;; TODO: add procedure?
+  (define user-pred-prims
+    '((pair? . 1) (null? . 1) (boolean? . 1) (vector? . 1) (box? . 1) (= . 2)
+      (< . 2) (<= . 2) (> . 2) (>= . 2) (eq? . 2)))
+
+  ;;; user effect primitives
+  (define user-effect-prims
+    '((vector-set! . 3) (box-set! . 2)))
+
+  ;;; an association list with the user primitives
+  (define user-prims
+    (append user-alloc-value-prims user-non-alloc-value-prims user-pred-prims
+      user-effect-prims))
+
+  ;;; void primitive + non-allocation user value primitives
+  (define void+user-non-alloc-value-prims
+    (cons '(void . 0) user-non-alloc-value-prims))
+
+  ;;; an association list with void and all the user primitives
+  (define void+user-prims
+    (append user-alloc-value-prims void+user-non-alloc-value-prims
+      user-pred-prims user-effect-prims))
+
+  ;;; all the allocation value primitives, including make-closure primitive
+  (define closure+user-alloc-value-prims
+    (cons '(make-closure . 1) user-alloc-value-prims))
+
+  ;;; all the non-allocation value primitives, include the closure primitives
+  (define closure+void+user-non-alloc-value-prims
+    (cons* '(closure-code . 2) '(closure-ref . 2)
+      void+user-non-alloc-value-prims))
+
+  ;; all the user effect primitives with the closure primitives
+  (define closure+user-effect-prims
     (cons* '(closure-code-set! . 2) '(closure-data-set! . 3)
-      '(closure-code . 1) '(closure-ref . 2) '(make-closure . 1)
-      extended-primitive-map))
+      user-effect-prims))
 
+  ;; all the user effect primitives, closure primitives, and internal primitives
+  (define internal+closure+user-effect-prims
+    (cons* '($vector-length-set! . 2) '($set-car! . 2) '($set-cdr! . 2)
+      closure+user-effect-prims))
+
+  ;; association list including all prims except the three final internal
+  ;; primitives
+  (define closure+void+user-prims
+    (append closure+user-alloc-value-prims
+      closure+void+user-non-alloc-value-prims user-pred-prims
+      closure+user-effect-prims))
+
+  ;;; various predicates for determining if a primitve is a valid prim.
   (define primitive?
     (lambda (x)
-      (and (assq x primitive-map) #t)))
+      (assq x user-prims)))
 
-  (define extended-primitive?
+  (define void+primitive?
     (lambda (x)
-      (and (assq x extended-primitive-map) #t)))
+      (assq x void+user-prims)))
 
-  (define extended+closure-primitive?
+  (define closure+void+primitive?
     (lambda (x)
-      (and (assq x extended+closure-primitive-map) #t)))
+      (assq x closure+void+user-prims)))
   
   (define effect-free-prim?
     (lambda (x)
-      (memq x '(car cdr cons make-vector vector-ref box unbox + - * / = < <= >
-                >= eq? make-closure closure-ref vector-length))))
+      (assq x (append void+user-non-alloc-value-prims user-alloc-value-prims
+                user-pred-prims))))
 
   (define predicate-primitive?
     (lambda (x)
-      (memq x '(pair? null? boolean? vector? box? = < <= > >= eq?))))
+      (assq x user-pred-prims)))
 
   (define effect-primitive?
     (lambda (x)
-      (memq x '(vector-set! box-set! closure-code-set! closure-data-set!))))
+      (assq x closure+user-effect-prims)))
 
   (define value-primitive?
     (lambda (x)
-      (memq x '(car cdr cons make-vector vector-ref box unbox + - * /
-                closure-code closure-ref make-closure vector-length void))))
+      (assq x (append closure+user-alloc-value-prims
+                closure+void+user-non-alloc-value-prims))))
 
   (define non-alloc-value-primitive?
     (lambda (x)
-      (memq x '(car cdr vector-ref unbox + - * / closure-code closure-ref
-                vector-length void))))
+      (assq x closure+void+user-non-alloc-value-prims)))
 
   (define effect+internal-primitive?
     (lambda (x)
-      (memq x '(vector-set! box-set! closure-code-set! closure-data-set!
-                $vector-length-set! $set-car! $set-cdr!))))
+      (assq x internal+closure+user-effect-prims)))
 
+  ;;;;;;;;;;
   ;;; Helper functions for identifying terminals in the nanopass languages.
+
+  ;;; determine if we have a 61-bit signed integer
   (define target-fixnum?
     (lambda (x)
       (and (and (integer? x) (exact? x))
            (<= (- (expt 2 60)) x (- (expt 2 60) 1)))))
 
+  ;;; determine if we have a constant: #t, #f, '(), or 61-bit signed integer.
   (define constant?
     (lambda (x)
       (or (target-fixnum? x) (boolean? x) (null? x))))
 
+  ;;; determine if we have a valid datum (a constant, a pair of datum, or a
+  ;;; vector of datum)
   (define datum?
     (lambda (x)
       (or (constant? x)
@@ -258,6 +427,8 @@
                        (and (datum? (vector-ref x i))
                             (loop i)))))))))
 
+  ;;; determine if we have a 64-bit signed integer (used later in the compiler
+  ;;; to hold the ptr representation).
   (define integer-64?
     (lambda (x)
       (and (and (integer? x) (exact? x))
@@ -273,13 +444,17 @@
                    ls
                    (loop (fx- n 1) (cons v ls))))]))
 
+  ;;;;;;;;
   ;;; The standard (not very efficient) Scheme representation of sets as lists
+  
+  ;;; add an item to a set
   (define set-cons
     (lambda (x set)
       (if (memq x set)
           set
           (cons x set))))
 
+  ;;; construct the intersection of 0 to n sets
   (define intersect
     (lambda set*
       (if (null? set*)
@@ -294,6 +469,7 @@
                                    (loop (cdr seta) fset))))))
             (car set*) (cdr set*)))))
 
+  ;;; construct the union of 0 to n sets
   (define union
     (lambda set*
       (if (null? set*)
@@ -305,18 +481,19 @@
                              (loop (cdr setb) (set-cons (car setb) seta)))))
             (car set*) (cdr set*)))))
 
+  ;;; construct the difference of 0 to n sets
   (define difference
     (lambda set*
       (if (null? set*)
           '()
           (fold-right (lambda (setb seta)
-                        (let loop ([seta seta] [setb setb])
+                        (let loop ([seta seta] [final '()])
                           (if (null? seta)
-                              setb
+                              final
                               (let ([a (car seta)])
                                 (if (memq a setb)
-                                    (loop (cdr seta) (remq a setb))
-                                    (loop (cdr seta) (cons a setb)))))))
+                                    (loop (cdr seta) final)
+                                    (loop (cdr seta) (cons a final)))))))
             (car set*) (cdr set*)))))
 
   ;;; Language definitions for Lsrc and L1 to L22
@@ -349,55 +526,57 @@
       (set! x e)
       (e e* ...)))
 
-  #;(define-language L1
-      (terminals
-        (symbol (x))
-        (extended-primitive (pr))
-        (constant (c))
-        (datum (d)))
-      (Expr (e body)
-        pr
-        x
-        c
-        (quote d)
-        (if e0 e1 e2)
-        (or e* ...)
-        (and e* ...)
-        (not e)
-        (begin e* ... e)
-        (lambda (x* ...) body* ... body)
-        (let ([x* e*] ...) body* ... body)
-        (letrec ([x* e*] ...) body* ... body)
-        (set! x e)
-        (e e* ...)))
-
+  ;;; Language 1: removes one-armed if and adds the void primitive
+  ;
+  ; (define-language L1
+  ;   (terminals (void+primitive (pr))
+  ;     (symbol (x))
+  ;     (constant (c))
+  ;     (datum (d)))
+  ;   (Expr (e body)
+  ;     pr
+  ;     x
+  ;     c
+  ;     (quote d)
+  ;     (if e0 e1 e2)
+  ;     (or e* ...)
+  ;     (and e* ...)
+  ;     (not e)
+  ;     (begin e* ... e)
+  ;     (lambda (x* ...) body* ... body)
+  ;     (let ([x* e*] ...) body* ... body)
+  ;     (letrec ([x* e*] ...) body* ... body)
+  ;     (set! x e)
+  ;     (e e* ...)))
+  ;
   (define-language L1
     (extends Lsrc)
     (terminals
       (- (primitive (pr)))
-      (+ (extended-primitive (pr))))
+      (+ (void+primitive (pr))))
     (Expr (e body)
       (- (if e0 e1))))
 
-  #;(define-language L2
-      (terminals
-        (symbol (x))
-        (extended-primitive (pr))
-        (constant (c))
-        (datum (d)))
-      (Expr (e body)
-        pr
-        x
-        c
-        (quote d)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (lambda (x* ...) body* ... body)
-        (let ([x* e*] ...) body* ... body)
-        (letrec ([x* e*] ...) body* ... body)
-        (set! x e)
-        (e e* ...)))
-
+  ;;; Language 2: removes or, and, and not forms
+  ;
+  ; (define-language L2
+  ;   (terminals (void+primitive (pr))
+  ;     (symbol (x))
+  ;     (constant (c))
+  ;     (datum (d)))
+  ;   (Expr (e body)
+  ;     pr
+  ;     x
+  ;     c
+  ;     (quote d)
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (lambda (x* ...) body* ... body)
+  ;     (let ([x* e*] ...) body* ... body)
+  ;     (letrec ([x* e*] ...) body* ... body)
+  ;     (set! x e)
+  ;     (e e* ...)))
+  ;
   (define-language L2
     (extends L1)
     (Expr (e body)
@@ -405,25 +584,28 @@
          (and e* ...)
          (not e))))
 
-  #;(define-language L3
-      (terminals
-        (symbol (x))
-        (extended-primitive (pr))
-        (constant (c))
-        (datum (d)))
-      (Expr (e body)
-        pr
-        x
-        c
-        (quote d)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (lambda (x* ...) body)
-        (let ([x* e*] ...) body)
-        (letrec ([x* e*] ...) body)
-        (set! x e)
-        (e e* ...)))
-
+  ;;; Language 3: removes multiple expressions from the body of lambda, let,
+  ;;; and letrec (to be replaced with a single begin expression that contains
+  ;;; the expressions from the body).
+  ;
+  ; (define-language L3
+  ;   (terminals (void+primitive (pr))
+  ;     (symbol (x))
+  ;     (constant (c))
+  ;     (datum (d)))
+  ;   (Expr (e body)
+  ;     (letrec ([x* e*] ...) body)
+  ;     (let ([x* e*] ...) body)
+  ;     (lambda (x* ...) body)
+  ;     pr
+  ;     x
+  ;     c
+  ;     (quote d)
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (set! x e)
+  ;     (e e* ...)))
+  ;
   (define-language L3
     (extends L2)
     (Expr (e body)
@@ -434,48 +616,52 @@
          (let ([x* e*] ...) body)
          (letrec ([x* e*] ...) body))))
 
-  #;(define-language L4
-      (terminals
-        (symbol (x))
-        (extended-primitive (pr))
-        (constant (c))
-        (datum (d)))
-      (Expr (e body)
-        x
-        c
-        (quote d)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (lambda (x* ...) body)
-        (let ([x* e*] ...) body)
-        (letrec ([x* e*] ...) body)
-        (set! x e)
-        (primcall pr e* ...)
-        (e e* ...)))
-
+  ;;; Language 4: removes raw primitives (to be replaced with a lambda and a
+  ;;; primitive call).
+  ;
+  ; (define-language L4
+  ;   (terminals (void+primitive (pr))
+  ;     (symbol (x))
+  ;     (constant (c))
+  ;     (datum (d)))
+  ;   (Expr (e body)
+  ;     (primcall pr e* ...)
+  ;     (letrec ([x* e*] ...) body)
+  ;     (let ([x* e*] ...) body)
+  ;     (lambda (x* ...) body)
+  ;     x
+  ;     c
+  ;     (quote d)
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (set! x e)
+  ;     (e e* ...)))
+  ;
   (define-language L4
     (extends L3)
     (Expr (e body)
       (- pr)
       (+ (primcall pr e* ...) => (pr e* ...))))
 
-  #;(define-language L5
-      (terminals
-        (symbol (x))
-        (extended-primitive (pr))
-        (datum (d)))
-      (Expr (e body)
-        x
-        (quote d)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (lambda (x* ...) body)
-        (let ([x* e*] ...) body)
-        (letrec ([x* e*] ...) body)
-        (set! x e)
-        (primcall pr e* ...)
-        (e e* ...)))
-
+  ;;; Language 5: removes raw constants (to be replaced with quoted constant).
+  ;
+  ; (define-language L5
+  ;   (terminals
+  ;     (void+primitive (pr))
+  ;     (symbol (x))
+  ;     (datum (d)))
+  ;   (Expr (e body)
+  ;     (primcall pr e* ...)
+  ;     (letrec ([x* e*] ...) body)
+  ;     (let ([x* e*] ...) body)
+  ;     (lambda (x* ...) body)
+  ;     x
+  ;     (quote d)
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (set! x e)
+  ;     (e e* ...)))
+  ;
   (define-language L5
     (extends L4)
     (terminals
@@ -483,23 +669,26 @@
     (Expr (e body)
       (- c)))
 
-  #;(define-language L6
-      (terminals
-        (symbol (x))
-        (extended-primitive (pr))
-        (constant (c)))
-      (Expr (e body)
-        x
-        (quote c)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (lambda (x* ...) body)
-        (let ([x* e*] ...) body)
-        (letrec ([x* e*] ...) body)
-        (set! x e)
-        (primcall pr e* ...)
-        (e e* ...)))
-
+  ;;; Language 6: removes quoted datum (to be replaced with explicit calls to
+  ;;; cons and make-vector+vector-set!).
+  ;
+  ; (define-language L6
+  ;   (terminals
+  ;     (constant (c))
+  ;     (void+primitive (pr))
+  ;     (symbol (x)))
+  ;   (Expr (e body)
+  ;     (quote c)
+  ;     (primcall pr e* ...)
+  ;     (letrec ([x* e*] ...) body)
+  ;     (let ([x* e*] ...) body)
+  ;     (lambda (x* ...) body)
+  ;     x
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (set! x e)
+  ;     (e e* ...)))
+  ;
   (define-language L6
     (extends L5)
     (terminals
@@ -509,25 +698,27 @@
       (- (quote d))
       (+ (quote c))))
 
-  #;(define-language L7
-      (terminals
-        (symbol (x a))
-        (extended-primitive (pr))
-        (constant (c)))
-      (Expr (e body)
-        x
-        (quote c)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (lambda (x* ...) abody)
-        (let ([x* e*] ...) abody)
-        (letrec ([x* e*] ...) abody)
-        (set! x e)
-        (primcall pr e* ...)
-        (e e* ...))
-      (AssignedBody (abody)
-        (assigned (a* ...) body) => body))
-
+  ;;; Language 7: adds a listing of assigned variables to the body of the
+  ;;; binding forms: let, letrec, and lambda.
+  ; (define-language L7
+  ;   (terminals
+  ;     (symbol (x a))
+  ;     (constant (c))
+  ;     (void+primitive (pr)))
+  ;   (Expr (e body)
+  ;     (letrec ([x* e*] ...) abody)
+  ;     (let ([x* e*] ...) abody)
+  ;     (lambda (x* ...) abody)
+  ;     (quote c)
+  ;     (primcall pr e* ...)
+  ;     x
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (set! x e)
+  ;     (e e* ...))
+  ;   (AssignedBody (abody)
+  ;     (assigned (a* ...) body)))
+  ;
   (define-language L7
     (extends L6)
     (terminals
@@ -543,27 +734,28 @@
     (AssignedBody (abody)
       (+ (assigned (a* ...) body) => body)))
 
-  #;(define-language L8
-      (terminals
-        (symbol (x ))
-        (extended-primitive (pr))
-        (constant (c)))
-      (Expr (e body)
-        x
-        (quote c)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        le
-        (let ([x* e*] ...) abody)
-        (letrec ([x* le*] ...) body)
-        (set! x e)
-        (primcall pr e* ...)
-        (e e* ...))
-      (LambdaExpr (le)
-        (lambda (x* ...) abody))
-      (AssignedBody (abody)
-        (assigned (a* ...) body) => body))
-
+  ;;; Language 8: letrec binding is changed to only bind variables to lambdas.
+  ;
+  ; (define-language L8
+  ;   (terminals (symbol (x a))
+  ;     (constant (c))
+  ;     (void+primitive (pr)))
+  ;   (Expr (e body)
+  ;     (letrec ([x* le*] ...) body)
+  ;     le
+  ;     (let ([x* e*] ...) abody)
+  ;     (quote c)
+  ;     (primcall pr e* ...)
+  ;     x
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (set! x e)
+  ;     (e e* ...))
+  ;   (AssignedBody (abody)
+  ;     (assigned (a* ...) body))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) abody)))
+  ;
   (define-language L8
     (extends L7)
     (Expr (e body)
@@ -574,82 +766,92 @@
     (LambdaExpr (le)
       (+ (lambda (x* ...) abody))))
 
-  #;(define-language L9
-      (terminals
-        (symbol (x ))
-        (extended-primitive (pr))
-        (constant (c)))
-      (Expr (e body)
-        x
-        (quote c)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (let ([x* e*] ...) abody)
-        (letrec ([x* le*] ...) body)
-        (set! x e)
-        (primcall pr e* ...)
-        (e e* ...))
-      (LambdaExpr (le)
-        (lambda (x* ...) abody))
-      (AssignedBody (abody)
-        (assigned (a* ...) body) => body))
-
+  ;;; Language 9: removes lambda expressions from expression context,
+  ;;; effectively meaning we can only have lambdas bound in the right-hand-side
+  ;;; of letrec expressions.
+  ;
+  ; (define-language L9
+  ;   (terminals
+  ;     (symbol (x a))
+  ;     (constant (c))
+  ;     (void+primitive (pr)))
+  ;   (Expr (e body)
+  ;     (letrec ([x* le*] ...) body)
+  ;     (let ([x* e*] ...) abody)
+  ;     (quote c)
+  ;     (primcall pr e* ...)
+  ;     x
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (set! x e)
+  ;     (e e* ...))
+  ;   (AssignedBody (abody)
+  ;     (assigned (a* ...) body))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) abody)))
+  ;
   (define-language L9
     (extends L8)
     (Expr (e body)
       (- le)))
       
-  #;(define-language L10
-      (terminals
-        (symbol (x))
-        (extended-primitive (pr))
-        (constant (c)))
-      (Expr (e body)
-        x
-        (quote c)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (let ([x* e*] ...) body)
-        (letrec ([x* le*] ...) body)
-        (primcall pr e* ...)
-        (e e* ...))
-      (LambdaExpr (le)
-        (lambda (x* ...) abody)))
-
-   (define-language L10
-     (extends L9)
-     (terminals
-       (- (symbol (x a)))
-       (+ (symbol (x))))
-     (Expr (e body)
-       (- (let ([x* e*] ...) abody)
-          (set! x e))
-       (+ (let ([x* e*] ...) body)))
-     (LambdaExpr (le)
-       (- (lambda (x* ...) abody))
-       (+ (lambda (x* ...) body)))
-     (AssignedBody (abody)
-       (- (assigned (a* ...) body))))
+  ;;; Language 10: removes set! and assigned bodies (to be replaced by set-box!
+  ;;; primcall for set!, and unbox primcall for references of assigned variables).
+  ;
+  ; (define-language L10
+  ;   (terminals
+  ;     (symbol (x))
+  ;     (constant (c))
+  ;     (void+primitive (pr)))
+  ;   (Expr (e body)
+  ;     (let ([x* e*] ...) body)
+  ;     (letrec ([x* le*] ...) body)
+  ;     (quote c)
+  ;     (primcall pr e* ...)
+  ;     x
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (e e* ...))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) body)))
+  ;
+  (define-language L10
+    (extends L9)
+    (terminals
+      (- (symbol (x a)))
+      (+ (symbol (x))))
+    (Expr (e body)
+      (- (let ([x* e*] ...) abody)
+         (set! x e))
+      (+ (let ([x* e*] ...) body)))
+    (LambdaExpr (le)
+      (- (lambda (x* ...) abody))
+      (+ (lambda (x* ...) body)))
+    (AssignedBody (abody)
+      (- (assigned (a* ...) body))))
   
-  #;(define-language L11
-      (terminals
-        (symbol (x f))
-        (extended-primitive (pr))
-        (constant (c)))
-      (Expr (e body)
-        x
-        (quote c)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (let ([x* e*] ...) body)
-        (letrec ([x* le*] ...) body)
-        (primcall pr e* ...)
-        (e e* ...))
-      (LambdaExpr (le)
-        (lambda (x* ...) fbody))
-      (FreeBody (fbody)
-        (free (f* ...) body)))
-
+  ;;; Language 11: add a list of free variables to the body of lambda
+  ;;; expressions (starting closure conversion code).
+  ;
+  ; (define-language L11
+  ;   (terminals
+  ;     (symbol (x f))
+  ;     (constant (c))
+  ;     (void+primitive (pr)))
+  ;   (Expr (e body)
+  ;     (let ([x* e*] ...) body)
+  ;     (letrec ([x* le*] ...) body)
+  ;     (quote c)
+  ;     (primcall pr e* ...)
+  ;     x
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (e e* ...))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) fbody))
+  ;   (FreeBody (fbody)
+  ;     (free (f* ...) body)))
+  ;
   (define-language L11
     (extends L10)
     (terminals
@@ -661,28 +863,33 @@
     (FreeBody (fbody)
       (+ (free (f* ...) body))))
 
-  #;(define-language L12
-      (terminals
-        (symbol (x f l))
-        (extended-primitive (pr))
-        (constant (c)))
-      (Expr (e body)
-        x
-        (label l)
-        (quote c)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (let ([x* e*] ...) body)
-        (closures ([x* l* f** ...] ...) lbody)
-        (primcall pr e* ...)
-        (e e* ...))
-      (LabelsBody (lbody)
-        (labels (l* ...) body))
-      (LambdaExpr (le)
-        (lambda (x* ...) fbody))
-      (FreeBody (fbody)
-        (free (f* ...) body)))
-
+  ;;; Language L12: removes the letrec form and adds closure and labels forms
+  ;;; to replace it.  The closure form binds a variable to a label (code
+  ;;; pointer) and its set of free variables, and the labels form binds labels
+  ;;; (code pointer) to lambda expressions.
+  ;
+  ; (define-language L12
+  ;   (terminals
+  ;     (symbol (x f l))
+  ;     (constant (c))
+  ;     (void+primitive (pr)))
+  ;   (Expr (e body)
+  ;     (label l)
+  ;     (closures ((x* l* f** ...) ...) lbody)
+  ;     (let ([x* e*] ...) body)
+  ;     (quote c)
+  ;     (primcall pr e* ...)
+  ;     x
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (e e* ...))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) fbody))
+  ;   (FreeBody (fbody)
+  ;     (free (f* ...) body))
+  ;   (LabelsBody (lbody)
+  ;     (labels ([l* le*] ...) body)))
+  ;
   (define-language L12
     (extends L11)
     (terminals
@@ -695,29 +902,33 @@
     (LabelsBody (lbody)
       (+ (labels ([l* le*] ...) body))))
 
-  #;(define-language L13
-      (terminals
-        (symbol (x f l))
-        (extended+closure-primitive (pr))
-        (constant (c)))
-      (Expr (e body)
-        x
-        (label l)
-        (quote c)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (let ([x* e*] ...) body)
-        (labels ([l* le*] ...) body)
-        (primcall pr e* ...)
-        (e e* ...))
-      (LambdaExpr (le)
-        (lambda (x* ...) body)))
-  
+  ;;; Language 13: finishes closure conversion, removes the closures form,
+  ;;; replacing it with primitive calls to deal with closure objects, and
+  ;;; raises the labels from into the Expr non-terminal.
+  ;
+  ; (define-language L13
+  ;   (terminals
+  ;     (closure+void+primitive (pr))
+  ;     (symbol (x f l))
+  ;     (constant (c)))
+  ;   (Expr (e body)
+  ;     (labels ([l* le*] ...) body)
+  ;     (label l)
+  ;     (let ([x* e*] ...) body)
+  ;     (quote c)
+  ;     (primcall pr e* ...)
+  ;     x
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (e e* ...))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) body)))
+  ;
   (define-language L13
     (extends L12)
     (terminals
-      (- (extended-primitive (pr)))
-      (+ (extended+closure-primitive (pr))))
+      (- (void+primitive (pr)))
+      (+ (closure+void+primitive (pr))))
     (Expr (e body)
       (- (closures ([x* l* f** ...] ...) lbody))
       (+ (labels ([l* le*] ...) body)))
@@ -729,24 +940,30 @@
     (FreeBody (fbody)
       (- (free (f* ...) body))))
 
-  #;(define-language L14
-      (terminals
-        (symbol (x f))
-        (extended+closure-primitive (pr))
-        (constant (c)))
-      (Program (p)
-        (labels ([l* le*] ...) body))
-      (Expr (e body)a
-        x
-        (quote c)
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (let ([x* e*] ...) body)
-        (primcall pr e* ...)
-        (e e* ...))
-      (LambdaExpr (le)
-        (lambda (x* ...) body)))
-  
+  ;;; Language 14: removes labels form from the Expr nonterminal and puts a
+  ;;; single labels form at the top.  Essentially this raises all of our
+  ;;; closure  converted functions to the top.
+  ;
+  ; (define-language L14
+  ;   (entry Program)
+  ;   (terminals
+  ;     (closure+void+primitive (pr))
+  ;     (symbol (x f l))
+  ;     (constant (c)))
+  ;   (Expr (e body)
+  ;     (label l)
+  ;     (let ([x* e*] ...) body)
+  ;     (quote c)
+  ;     (primcall pr e* ...)
+  ;     x
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (e e* ...))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) body))
+  ;   (Program (p)
+  ;     (labels ([l* le*] ...) l)))
+  ;
   (define-language L14
     (extends L13)
     (entry Program)
@@ -755,26 +972,33 @@
     (Expr (e body)
       (- (labels ([l* le*] ...) body))))
 
-  #;(define-language L15
-      (terminals
-        (symbol (x f))
-        (extended+closure-primitive (pr))
-        (constant (c)))
-      (Program (p)
-        (labels ([l* le*] ...) body))
-      (Expr (e body)
-        se
-        (if e0 e1 e2)
-        (begin e* ... e)
-        (let ([x* e*] ...) body)
-        (primcall pr se* ...)
-        (se se* ...))
-      (SimpleExpr (se)
-        x
-        (quote c))
-      (LambdaExpr (le)
-        (lambda (x* ...) body)))
-  
+  ;;; Language 15: moves simple expressions (constants and variable references)
+  ;;; out of the Expr nonterminal, and replaces expressions referred to in
+  ;;; calls and primcalls with simple expressions.  This effectively removes
+  ;;; complex operands to calls and primcalls.
+  ;
+  ; (define-language L15
+  ;   (entry Program)
+  ;   (terminals
+  ;     (closure+void+primitive (pr))
+  ;     (symbol (x f l))
+  ;     (constant (c)))
+  ;   (Expr (e body)
+  ;     (se se* ...)
+  ;     (primcall pr se* ...)
+  ;     se
+  ;     (label l)
+  ;     (let ([x* e*] ...) body)
+  ;     (if e0 e1 e2)
+  ;     (begin e* ... e))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) body))
+  ;   (Program (p)
+  ;     (labels ([l* le*] ...) l))
+  ;   (SimpleExpr (se)
+  ;     x
+  ;     (quote c)))
+  ;
   (define-language L15
     (extends L14)
     (Expr (e body)
@@ -789,6 +1013,10 @@
       (+ x
          (quote c))))
   
+  ;;; Language 16: separates the Expr nonterminal into the Value, Effect, and
+  ;;; Predicate nonterminals.  This is needed to translate from our expression
+  ;;; language into a language like C that has statements (effects) and
+  ;;; expressions (values) and predicates that need to be simply values.
   (define-language L16
     (terminals
       (symbol (x l))
@@ -826,46 +1054,50 @@
       (let ([x* v*] ...) p)
       (primcall ppr se* ...)))
 
-  #;(define-language L17
-      (entry Program)
-      (terminals
-        (integer-64 (i))
-        (effect+internal-primitive (epr))
-        (non-alloc-value-primitive (vpr))
-        (symbol (x l))
-        (predicate-primitive (ppr))
-        (constant (c)))
-      (Program (prog)
-        (labels ((l* le*) ...) l))
-      (LambdaExpr (le)
-        (lambda (x* ...) body))
-      (SimpleExpr (se)
-        x
-        (label l)
-        (quote c))
-      (Value (v body)
-        (alloc i se)
-        se
-        (if p0 v1 v2)
-        (begin e* ... v)
-        (let ([x* v*] ...) body)
-        (primcall vpr se* ...)
-        (se se* ...))
-      (Effect (e)
-        (nop)
-        (if p0 e1 e2)
-        (begin e* ... e)
-        (let ([x* v*] ...) e)
-        (primcall epr se* ...)
-        (se se* ...))
-      (Predicate (p)
-        (true)
-        (false)
-        (if p0 p1 p2)
-        (begin e* ... p)
-        (let ([x* v*] ...) p)
-        (primcall ppr se* ...)))
-
+  ;;; Language 17: removes the allocation primitives: cons, box, make-vector,
+  ;;; and make-closure and adds a generic alloc form for specifying allocation.  It
+  ;;; also adds raw integers for specifying type tags in the alloc form.
+  ;
+  ; (define-language L17
+  ;   (entry Program)
+  ;   (terminals
+  ;     (integer-64 (i))
+  ;     (effect+internal-primitive (epr))
+  ;     (non-alloc-value-primitive (vpr))
+  ;     (symbol (x l))
+  ;     (predicate-primitive (ppr))
+  ;     (constant (c)))
+  ;   (Program (prog)
+  ;     (labels ([l* le*] ...) l))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) body))
+  ;   (SimpleExpr (se)
+  ;     x
+  ;     (label l)
+  ;     (quote c))
+  ;   (Value (v body)
+  ;     (alloc i se)
+  ;     se
+  ;     (if p0 v1 v2)
+  ;     (begin e* ... v)
+  ;     (let ([x* v*] ...) body)
+  ;     (primcall vpr se* ...)
+  ;     (se se* ...))
+  ;   (Effect (e)
+  ;     (nop)
+  ;     (if p0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (let ([x* v*] ...) e)
+  ;     (primcall epr se* ...)
+  ;     (se se* ...))
+  ;   (Predicate (p)
+  ;     (true)
+  ;     (false)
+  ;     (if p0 p1 p2)
+  ;     (begin e* ... p)
+  ;     (let ([x* v*] ...) p)
+  ;     (primcall ppr se* ...)))
+  ;
   (define-language L17
     (extends L16)
     (terminals
@@ -877,46 +1109,51 @@
     (Value (v body)
       (+ (alloc i se))))
 
-  #;(define-language L18
-      (entry Program)
-      (terminals
-        (integer-64 (i))
-        (effect+internal-primitive (epr))
-        (non-alloc-value-primitive (vpr))
-        (symbol (x l))
-        (predicate-primitive (ppr))
-        (constant (c)))
-      (Program (prog)
-        (labels ((l* le*) ...) l))
-      (SimpleExpr (se)
-        x
-        (label l)
-        (quote c))
-      (Value (v body)
-        (alloc i se)
-        se
-        (if p0 v1 v2)
-        (begin e* ... v)
-        (primcall vpr se* ...)
-        (se se* ...))
-      (Effect (e)
-        (set! x v)
-        (nop)
-        (if p0 e1 e2)
-        (begin e* ... e)
-        (primcall epr se* ...)
-        (se se* ...))
-      (Predicate (p)
-        (true)
-        (false)
-        (if p0 p1 p2)
-        (begin e* ... p)
-        (primcall ppr se* ...))
-      (LocalsBody (lbody)
-        (locals (x* ...) body))
-      (LambdaExpr (le)
-        (lambda (x* ...) lbody)))
-  
+  ;;; Language L18: removes let forms and replaces them with a top-level locals
+  ;;; form that indicates which variables are bound in the function (so they
+  ;;; can be listed at the top of our C function) and set! that do simple
+  ;;; assignments.
+  ;
+  ; (define-language L18
+  ;   (entry Program)
+  ;   (terminals
+  ;     (integer-64 (i))
+  ;     (effect+internal-primitive (epr))
+  ;     (non-alloc-value-primitive (vpr))
+  ;     (symbol (x l))
+  ;     (predicate-primitive (ppr))
+  ;     (constant (c)))
+  ;   (Program (prog)
+  ;     (labels ([l* le*] ...) l))
+  ;   (SimpleExpr (se)
+  ;     x
+  ;     (label l)
+  ;     (quote c))
+  ;   (Value (v body)
+  ;     (alloc i se)
+  ;     se
+  ;     (if p0 v1 v2)
+  ;     (begin e* ... v)
+  ;     (primcall vpr se* ...)
+  ;     (se se* ...))
+  ;   (Effect (e)
+  ;     (set! x v)
+  ;     (nop)
+  ;     (if p0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (primcall epr se* ...)
+  ;     (se se* ...))
+  ;   (Predicate (p)
+  ;     (true)
+  ;     (false)
+  ;     (if p0 p1 p2)
+  ;     (begin e* ... p)
+  ;     (primcall ppr se* ...))
+  ;   (LocalsBody (lbody)
+  ;     (locals (x* ...) body))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) lbody)))
+  ;
   (define-language L18
     (extends L17)
     (Value (v body)
@@ -932,48 +1169,51 @@
     (LocalsBody (lbody)
       (+ (locals (x* ...) body))))
 
-  #;(define-language L19
-      (entry Program)
-      (terminals
-        (integer-64 (i))
-        (effect+internal-primitive (epr))
-        (non-alloc-value-primitive (vpr))
-        (symbol (x l))
-        (predicate-primitive (ppr))
-        (constant (c)))
-      (Program (prog)
-        (labels ((l* le*) ...) l))
-      (SimpleExpr (se)
-        x
-        (label l)
-        (quote c))
-      (Value (v body)
-        rhs
-        (if p0 v1 v2)
-        (begin e* ... v))
-      (Effect (e)
-        (set! x rhs)
-        (nop)
-        (if p0 e1 e2)
-        (begin e* ... e)
-        (primcall epr se* ...)
-        (se se* ...))
-      (Predicate (p)
-        (true)
-        (false)
-        (if p0 p1 p2)
-        (begin e* ... p)
-        (primcall ppr se* ...))
-      (LocalsBody (lbody)
-        (locals (x* ...) body))
-      (LambdaExpr (le)
-        (lambda (x* ...) lbody))
-      (Rhs (rhs)
-        se
-        (alloc i se)
-        (primcall vpr se* ...)
-        (se se* ...)))
-
+  ;;; Language 19: simplify the right-hand-side of a set! so that it can
+  ;;; contain, simple expression, allocations, primcalls, and function calls,
+  ;;; but not ifs, or begins.
+  ;
+  ; (define-language L19
+  ;   (terminals
+  ;     (integer-64 (i))
+  ;     (effect+internal-primitive (epr))
+  ;     (non-alloc-value-primitive (vpr))
+  ;     (symbol (x l))
+  ;     (predicate-primitive (ppr))
+  ;     (constant (c)))
+  ;   (Program (prog)
+  ;     (labels ([l* le*] ...) l))
+  ;   (SimpleExpr (se)
+  ;     x
+  ;     (label l)
+  ;     (quote c))
+  ;   (Value (v body)
+  ;     rhs
+  ;     (if p0 v1 v2)
+  ;     (begin e* ... v))
+  ;   (Effect (e)
+  ;     (set! x rhs)
+  ;     (nop)
+  ;     (if p0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (primcall epr se* ...)
+  ;     (se se* ...))
+  ;   (Predicate (p)
+  ;     (true)
+  ;     (false)
+  ;     (if p0 p1 p2)
+  ;     (begin e* ... p)
+  ;     (primcall ppr se* ...))
+  ;   (LocalsBody (lbody)
+  ;     (locals (x* ...) body))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) lbody))
+  ;   (Rhs (rhs)
+  ;     se
+  ;     (alloc i se)
+  ;     (primcall vpr se* ...)
+  ;     (se se* ...)))
+  ;
   (define-language L19
     (extends L18)
     (Value (v body)
@@ -991,148 +1231,165 @@
       (- (set! x v))
       (+ (set! x rhs))))
 
-  #;(define-language L20 
-      (entry Program)
-      (terminals
-        (integer-64 (i))
-        (effect+internal-primitive (epr))
-        (non-alloc-value-primitive (vpr))
-        (symbol (x l))
-        (predicate-primitive (ppr))
-        (constant (c)))
-      (Program (prog)
-        (labels ((l* le*) ...) l))
-      (SimpleExpr (se)
-        x
-        (quote c))
-      (Value (v body)
-        rhs 
-        (if p0 v1 v2)
-        (begin e* ... v))
-      (Effect (e)
-        (set! x rhs)
-        (nop)
-        (if p0 e1 e2)
-        (begin e* ... e)
-        (primcall epr se* ...)
-        (se se* ...))
-      (Predicate (p)
-        (true)
-        (false)
-        (if p0 p1 p2)
-        (primcall ppr se* ...))
-      (LocalsBody (lbody)
-        (locals (x* ...) body))
-      (LambdaExpr (le)
-        (lambda (x* ...) lbody))
-      (Rhs (rhs)
-        se
-        (alloc i se)
-        (primcall vpr se* ...)
-        (se se* ...)))
+  ;;; Language L20: remove begin from the predicate production (effectively
+  ;;; forcing the if to only have if, true, false, and predicate primitive
+  ;;; calls).
+  ;;; TODO: removed this language because our push-if pass was buggy, and
+  ;;;       fixing it requires us to flatten code into something like
+  ;;;       basic blocks, and we can avoid doing this since our target
+  ;;;       is C.  We could revisit it for other backend targets.
+  ;
+  ; (define-language L20
+  ;   (terminals
+  ;     (integer-64 (i))
+  ;     (effect+internal-primitive (epr))
+  ;     (non-alloc-value-primitive (vpr))
+  ;     (symbol (x l))
+  ;     (predicate-primitive (ppr))
+  ;     (constant (c)))
+  ;   (Program (prog)
+  ;     (labels ([l* le*] ...) l))
+  ;   (SimpleExpr (se)
+  ;     x
+  ;     (label l)
+  ;     (quote c))
+  ;   (Value (v body)
+  ;     rhs
+  ;     (if p0 v1 v2)
+  ;     (begin e* ... v))
+  ;   (Effect (e)
+  ;     (set! x rhs)
+  ;     (nop)
+  ;     (if p0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (primcall epr se* ...)
+  ;     (se se* ...))
+  ;   (Predicate (p)
+  ;     (true)
+  ;     (false)
+  ;     (if p0 p1 p2)
+  ;     (primcall ppr se* ...))
+  ;   (LocalsBody (lbody)
+  ;     (locals (x* ...) body))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) lbody))
+  ;   (Rhs (rhs)
+  ;     se
+  ;     (alloc i se)
+  ;     (primcall vpr se* ...)
+  ;     (se se* ...)))
+  ;
+  ; (define-language L20
+  ;   (extends L19)
+  ;   (Predicate (p)
+  ;     (- (begin e* ... p))))
 
-  (define-language L20
-    (extends L19)
-    (Predicate (p)
-      (- (begin e* ... p))))
-
-  #;(define-language L21
-      (entry Program)
-      (terminals
-        (integer-64 (i))
-        (effect+internal-primitive (epr))
-        (non-alloc-value-primitive (vpr))
-        (symbol (x l))
-        (predicate-primitive (ppr)))
-      (Program (prog) 
-        (labels ((l* le*) ...) l))
-      (SimpleExpr (se)
-        i
-        (label l)
-        x)
-      (Value (v body)
-        rhs
-        (if p0 v1 v2)
-        (begin e* ... v))
-      (Effect (e)
-        (set! x rhs)
-        (nop)
-        (if p0 e1 e2)
-        (begin e* ... e)
-        (primcall epr se* ...)
-        (se se* ...))
-      (Predicate (p)
-        (true)
-        (false)
-        (if p0 p1 p2)
-        (primcall ppr se* ...))
-      (LocalsBody (lbody)
-        (locals (x* ...) body))
-      (LambdaExpr (le)
-        (lambda (x* ...) lbody))
-      (Rhs (rhs)
-        se
-        (alloc i se)
-        (primcall vpr se* ...)
-       (se se* ...)))
-  
+  ;;; Language 21: remove quoted constants and replace it with our raw ptr
+  ;;; representation (i.e. 64-bit integers)
+  ;
+  ; (define-language L21
+  ;   (terminals
+  ;     (integer-64 (i))
+  ;     (effect+internal-primitive (epr))
+  ;     (non-alloc-value-primitive (vpr))
+  ;     (symbol (x l))
+  ;     (predicate-primitive (ppr)))
+  ;   (Program (prog)
+  ;     (labels ([l* le*] ...) l))
+  ;   (SimpleExpr (se)
+  ;     i
+  ;     x
+  ;     (label l))
+  ;   (Value (v body)
+  ;     rhs
+  ;     (if p0 v1 v2)
+  ;     (begin e* ... v))
+  ;   (Effect (e)
+  ;     (set! x rhs)
+  ;     (nop)
+  ;     (if p0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (primcall epr se* ...)
+  ;     (se se* ...))
+  ;   (Predicate (p)
+  ;     (true)
+  ;     (false)
+  ;     (if p0 p1 p2)
+  ;     (primcall ppr se* ...))
+  ;   (LocalsBody (lbody)
+  ;     (locals (x* ...) body))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) lbody))
+  ;   (Rhs (rhs)
+  ;     se
+  ;     (alloc i se)
+  ;     (primcall vpr se* ...)
+  ;     (se se* ...)))
+  ;
   (define-language L21
-    (extends L20)
+    (extends L19)
     (terminals
       (- (constant (c))))
     (SimpleExpr (se)
       (- (quote c))
       (+ i)))
 
-  #;(define-language L22
-      (entry Program)
-      (terminals
-        (integer-64 (i))
-        (effect+internal-primitive (epr))
-        (non-alloc-value-primitive (vpr))
-        (symbol (x l))
-        (predicate-primitive (ppr)))
-      (Program (prog)
-        (labels ((l* le*) ...) l))
-      (SimpleExpr (se)
-        (logand se0 se1)
-        (shift-right se0 se1)
-        (shift-left se0 se1)
-        (divide se0 se1)
-        (multiply se0 se1)
-        (subtract se0 se1)
-        (add se0 se1)
-        (mref se0 (maybe se1?) i)
-        (label l)
-        i
-        x)
-      (Value (v body)
-        rhs
-        (if p0 v1 v2)
-        (begin e* ... v))
-      (Effect (e)
-        (mset! se0 (maybe se1?) i se2)
-        (set! x rhs)
-        (nop)
-        (if p0 e1 e2)
-        (begin e* ... e)
-        (se se* ...))
-      (Predicate (p)
-        (<= se0 se1)
-        (< se0 se1)
-        (= se0 se1)
-        (true)
-        (false)
-        (if p0 p1 p2))
-      (LocalsBody (lbody)
-        (locals (x* ...) body))
-      (LambdaExpr (le)
-        (lambda (x* ...) lbody))
-      (Rhs (rhs)
-        se
-        (alloc i se)
-        (se se* ...)))
-
+  ;;; Language 22: remove the primcalls and replace them with mref (memory
+  ;;; references), add, subtract, multiply, divide, shift-right, shift-left,
+  ;;; logand, mset! (memory set), =, <, and <=.
+  ;;;
+  ;;; TODO: we should probably replace this with "machine" instructions
+  ;;; instead, so that we can more easily extend the language and generate C
+  ;;; code from it.
+  ;
+  ; (define-language L22
+  ;   (terminals
+  ;     (integer-64 (i))
+  ;     (effect+internal-primitive (epr))
+  ;     (non-alloc-value-primitive (vpr))
+  ;     (symbol (x l))
+  ;     (predicate-primitive (ppr)))
+  ;   (Program (prog)
+  ;     (labels ([l* le*] ...) l))
+  ;   (SimpleExpr (se)
+  ;     (logand se0 se1)
+  ;     (shift-left se0 se1)
+  ;     (shift-right se0 se1)
+  ;     (divide se0 se1)
+  ;     (multiply se0 se1)
+  ;     (subtract se0 se1)
+  ;     (add se0 se1)
+  ;     (mref se0 (maybe se1?) i)
+  ;     i
+  ;     x
+  ;     (label l))
+  ;   (Value (v body)
+  ;     rhs
+  ;     (if p0 v1 v2)
+  ;     (begin e* ... v))
+  ;   (Effect (e)
+  ;     (mset! se0 (maybe se1?) i se2)
+  ;     (set! x rhs)
+  ;     (nop)
+  ;     (if p0 e1 e2)
+  ;     (begin e* ... e)
+  ;     (se se* ...))
+  ;   (Predicate (p)
+  ;     (<= se0 se1)
+  ;     (< se0 se1)
+  ;     (= se0 se1)
+  ;     (true)
+  ;     (false)
+  ;     (if p0 p1 p2))
+  ;   (LocalsBody (lbody)
+  ;     (locals (x* ...) body))
+  ;   (LambdaExpr (le)
+  ;     (lambda (x* ...) lbody))
+  ;   (Rhs (rhs)
+  ;     se
+  ;     (alloc i se)
+  ;     (se se* ...)))
+  ;
   (define-language L22
     (extends L21)
     (Rhs (rhs)
@@ -1155,8 +1412,32 @@
          (< se0 se1)
          (<= se0 se1))))
 
+  ;;;;;;;;;
+  ;;; beginning of our pass listings
+
+  ;;; pass: parse-and-rename : S-expression -> Lsrc (or error)
+  ;;; 
+  ;;; parses an S-expression, and, if it conforms to the input language,
+  ;;; renames the local variables to be represented with a unique variable.
+  ;;; This helps us to separate keywords from varialbes and recognize one
+  ;;; variable binding as different from another.  This step is also called
+  ;;; alpha-renaming or alpha-conversion.  The output will be in the Lsrc
+  ;;; language forms, represented as records.
+  ;;;
+  ;;; Some design decisions here:  We could have decided to have this pass
+  ;;; remove one-armed ifs, remove and, or, and not, setup begins in the body
+  ;;; of our letrec, let, and lambda, and potentially quoted constants and
+  ;;; eta-expanded raw primitives, rather than doing each of these as separate
+  ;;; passes.  I have not done this here, primarily for educational reasons,
+  ;;; since these simple passes are a gentle introduction to how the passes are
+  ;;; written.
+  ;;;
   (define-pass parse-and-rename : * (e) -> Lsrc ()
+    ;;; Helper functions for this pass.
     (definitions
+      ;;; process-body - used to process the body of begin, let, letrec, and
+      ;;; lambda expressions.  since all four of these have the same pattern in
+      ;;; the body.
       (define process-body
         (lambda (who env body* f)
           (when (null? body*) (error who "invalid empty body"))
@@ -1165,12 +1446,19 @@
                 (f (reverse rbody*) (Expr body env))
                 (loop (car body*) (cdr body*)
                   (cons (Expr body env) rbody*))))))
+      ;;; vars-unique? - processes the list of bindings to make sure all of the
+      ;;; variable names are different (i.e. we don't want to allow
+      ;;; (lambda (x x) x), since we would not know which x is which).
       (define vars-unique?
         (lambda (fmls)
           (let loop ([fmls fmls])
             (or (null? fmls)
                 (and (not (memq (car fmls) (cdr fmls)))
                      (loop (cdr fmls)))))))
+      ;;; unique-vars - builds a list of unique variables based on a set of
+      ;;; formals and extends the environment.  it takes a function as an
+      ;;; argument (effectively a continuation), and passes it the updated
+      ;;; environment and a list of unique variables.
       (define unique-vars
         (lambda (env fmls f)
           (unless (vars-unique? fmls)
@@ -1181,6 +1469,11 @@
                 (let* ([fml (car fmls)] [ufml (unique-var fml)])
                   (loop (cdr fmls) (cons (cons fml ufml) env)
                     (cons ufml rufmls)))))))
+      ;;; process-bindings - processes the bindings of a let or letrec and
+      ;;; produces bindings for unique variables for each of the original
+      ;;; variables.  it also processes the right-hand sides of the variable
+      ;;; bindings and selects either the original environment (for let) or the
+      ;;; updated environment (for letrec).
       (define process-bindings
         (lambda (rec? env bindings f)
           (let loop ([bindings bindings] [rfml* '()] [re* '()])
@@ -1200,10 +1493,22 @@
                 (let ([binding (car bindings)])
                   (loop (cdr bindings) (cons (car binding) rfml*)
                     (cons (cadr binding) re*)))))))
+      ;;; Expr* - helper to process a list of expressions.
       (define Expr*
         (lambda (e* env)
           (map (lambda (e) (Expr e env)) e*)))
+      ;;; with-output-language rebinds quasiquote so that it will build
+      ;;; language records.
       (with-output-language (Lsrc Expr)
+        ;;; build-primitive - this is a helper function to build entries in the
+        ;;; initial environment for our user primitives.  the initial
+        ;;; enviornment contains a mapping of keywords and primitives to
+        ;;; processing functions that check their arity (in the case of
+        ;;; primitives) or their forms (in the case of keywords).  These are
+        ;;; put into an environment, because keywords and primitives can be
+        ;;; rebound.  (i.e. (lambda (lambda) (lambda lambda)) is a perfectly
+        ;;; valid function in Scheme that takes a function as an argument and
+        ;;; applies the argument to itself).
         (define build-primitive
           (lambda (as)
             (let ([name (car as)] [argc (cdr as)])
@@ -1212,6 +1517,15 @@
                     (error who
                       "primitives with arbitrary counts are not currently supported"
                       name)
+                    ;;; we'd love to support arbitrary argument lists, but we'd
+                    ;;; need to either:
+                    ;;;   1. get rid of raw primitives, or
+                    ;;;   2. add function versions of our raw primitives with
+                    ;;;      arbitrary arguments, or (possibly and)
+                    ;;;   3. add general handling for functions with arbitrary
+                    ;;;      arguments. (i.e. support for (lambda args <body>)
+                    ;;;      or (lambda (x y . args) <body>), which we don't
+                    ;;;      currently support.
                     #;(let ([argc (bitwise-not argc)])
                       (lambda (env . e*)
                         (if (>= (length e*) argc)
@@ -1223,6 +1537,12 @@
                           `(,name ,(Expr* e* env) ...)
                           (error name "invalid argument count"
                             (cons name e*)))))))))
+        ;;; initial-env - this is our initial environment, expressed as an
+        ;;; association list of keywords and primitives (represented as
+        ;;; symbols) to procedure handlers (represented as procedures).  As the
+        ;;; program is processed through this pass, it will be extended with
+        ;;; local bidings from variables (represented as symbols) to unique
+        ;;; variables (represented as symbols with a format of symbol.number).
         (define initial-env
           (cons*
             (cons 'quote (lambda (env d)
@@ -1275,11 +1595,18 @@
                                        (list 'set! x e)))))]
                             [else (error 'set! "set to unbound variable"
                                     (list 'set! x e))])))
-            (map build-primitive primitive-map)))
+            (map build-primitive user-prims)))
+        ;;; App - helper for handling applications.
         (define App
           (lambda (e env)
             (let ([e (car e)] [e* (cdr e)])
               `(,(Expr e env) ,(Expr* e* env) ...))))))
+    ;;; transformer: Expr: S-expression -> LSrc:Expr (or error)
+    ;;;
+    ;;; parses an S-expression, looking for a pair (which indicates, a
+    ;;; keyword use, a primitive call, or a normal function call), a symbol
+    ;;; (which indicates a variable reference or a primitive reference), or one of
+    ;;; our constants (which indicates a raw constant).
     (Expr : * (e env) -> Expr ()
       (cond
         [(pair? e)
@@ -1303,33 +1630,96 @@
            [else (error who "unbound variable" e)])]
         [(constant? e) e]
         [else (error who "invalid expression" e)]))
+    ;;; kick off processing the S-expression by handing Expr our initial
+    ;;; S-expression and the initial environment.
     (Expr e initial-env))
   
+  ;;; pass: remove-one-armed-if : Lsrc -> L1
+  ;;;
+  ;;; this pass replaces the (if e0 e1) form with an if that will explicitly
+  ;;; produce a void value when the predicate expression returns false. In
+  ;;; other words:
+  ;;; (if e0 e1) => (if e0 e1 (void))
+  ;;;
+  ;;; Design descision: kept seperate from parse-and-rename to make it easier
+  ;;; to understand how the nanopass framework can be used.
+  ;;;
   (define-pass remove-one-armed-if : Lsrc (e) -> L1 ()
     (Expr : Expr (e) -> Expr ()
       [(if ,[e0] ,[e1]) `(if ,e0 ,e1 (void))]))
   
+  ;;; pass: remove-and-or-not : L1 -> L2
+  ;;;
+  ;;; this pass looks for references to and, or, and not and replaces it with
+  ;;; the appropriate if expressions.  this pass follows the standard
+  ;;; expansions and has one small optimization:
+  ;;;
+  ;;; (if (not e0) e1 e2) => (if e0 e2 e1)           [optimization]
+  ;;; (and)               => #t                      [from Scheme standard]
+  ;;; (or)                => #f                      [from Scheme standard]
+  ;;; (and e e* ...)      => (if e (and e* ...) #f)  [standard expansion]
+  ;;; (or e e* ...)       => (let ([t e])            [standard expansion -
+  ;;;                          (if t t (or e* ...)))  avoids computing e twice]
+  ;;;
+  ;;; Design decision: again kept separate from parse-and-rename to simplify
+  ;;; the discussion of this pass (adding it to parse-and-rename doesn't really
+  ;;; make parse-and-rename much more complicated, and if we had a macro
+  ;;; system, which would likely be implemented in parse-and-rename, or before
+  ;;; it, we would probably want and, or, and not defined as macros, rather
+  ;;; than forms in the language, in which case this pass would be
+  ;;; unnecessary).
+  ;;;
   (define-pass remove-and-or-not : L1 (e) -> L2 ()
     (Expr : Expr (e) -> Expr ()
       [(if (not ,[e0]) ,[e1] ,[e2]) `(if ,e0 ,e2 ,e1)]
       [(not ,[e0]) `(if ,e0 #f #t)]
       [(and) #t]
       [(and ,[e] ,[e*] ...)
+       ;; tiny inline loop (not tail recursive, so called f instead of loop)
        (let f ([e e] [e* e*])
          (if (null? e*)
              e
              `(if ,e ,(f (car e*) (cdr e*)) #f)))]
       [(or) #f]
       [(or ,[e] ,[e*] ...)
+       ;; tiny inline loop (not tail recursive, so called f instead of loop)
        (let f ([e e] [e* e*])
          (if (null? e*)
              e
              (let ([t (make-tmp)])
                `(let ([,t ,e]) (if ,t ,t ,(f (car e*) (cdr e*)))))))]))
 
+  ;;; pass: make-being-explicit : L2 -> L3
+  ;;;
+  ;;; this pass takes the L2 let, letrec, and lambda expressions (which have
+  ;;; bodies that can contain more than one expression), and converts them into
+  ;;; bodies with a single expression, wrapped in a begin if necessary.  To
+  ;;; avoid polluting the output with extra begins that contain only one
+  ;;; expression the build-begin helper checks to see if there is more then one
+  ;;; expression and if there is builds a begin.
+  ;;;
+  ;;; Effectively this does the following:
+  ;;; (let ([x* e*] ...) body0 body* ... body1) =>
+  ;;;   (let ([x* e*] ...) (begin body0 body* ... body1))
+  ;;; (letrec ([x* e*] ...) body0 body* ... body1) =>
+  ;;;   (letrec ([x* e*] ...) (begin body0 body* ... body1))
+  ;;; (lambda (x* ...) body0 body* ... body1) =>
+  ;;;   (lambda (x* ...) (begin body0 body* ... body1))
+  ;;;
+  ;;; Design Decision: This could have been included with rename-and-parse,
+  ;;; without making it significantly more compilicated, but was separated out
+  ;;; to continue with simpler nanopass passes to help make it more obvious
+  ;;; what is going on here.
+  ;;;
   (define-pass make-begin-explicit : L2 (e) -> L3 ()
     (Expr : Expr (e) -> Expr ()
+      ;;; Note: the defitions are within the body of the Expr transformer
+      ;;; instead of being within the body of the pass.  This means the
+      ;;; quasiquote is bound to the Expr form, and we don't need to use
+      ;;; with-output-language.
       (definitions
+        ;;; build-begin - helper function to build a begin only when the body
+        ;;; contains more then one expression.
         (define build-begin
           (lambda (body* body)
             (if (null? body*)
@@ -1342,35 +1732,103 @@
       [(lambda (,x* ...) ,[body*] ... ,[body])
        `(lambda (,x* ...) ,(build-begin body* body))]))
 
+  ;;; pass : inverse-eta-raw-primitives : L3 -> L4
+  ;;;
+  ;;; Eta reduction recognizes a function that takes a set of arguments and
+  ;;; passes those arguments directly to another function, and unwraps the
+  ;;; function.  For instance, the function:
+  ;;;   (lambda (x y) (f x y))
+  ;;; can be eta reduced to:
+  ;;;   f
+  ;;; Eta reduction is not always a semantics preserving transformation because
+  ;;; it can change the termination properties of the program, for instance a
+  ;;; program that terminates, could turn into one that does not because a
+  ;;; function is applied directly, rather than a function that might never be
+  ;;; applied.
+  ;;;
+  ;;; In this pass, we are applying the inverse operation and adding a lambda
+  ;;; wrapper when we see a primitive.  We do this so that primitives, which we
+  ;;; are going to open code into a C-code equivalent, can still be treated as
+  ;;; though it was a Scheme procedure.  This allows us to map over primitives,
+  ;;; which would otherwise not be possible with our code generation.  Our
+  ;;; transformation looks for primitives in call position, marking them as
+  ;;; primitive calls, and primitives not in call position are eta-expanded to move
+  ;;; them into call position.
+  ;;;
+  ;;; (pr e* ...) => (primcall pr e* ...)
+  ;;; pr          => (lambda (x* ...) (primcall pr x* ...))
+  ;;; 
+  ;;; Design decision: Another way to handle this would be to create a single
+  ;;; function for each primitive, and lift these definitions to the top-level
+  ;;; of the program, including just those primitives that are used.  This
+  ;;; would avoid the potential to re-creating the same procedure over and over
+  ;;; again, as we are now.
+  ;;; 
   (define-pass inverse-eta-raw-primitives : L3 (e) -> L4 ()
     (Expr : Expr (e) -> Expr ()
       [(,pr ,[e*] ...) `(primcall ,pr ,e* ...)]
       [,pr (cond
-             [(assq pr extended-primitive-map) =>
+             [(assq pr void+user-prims) =>
               (lambda (as)
                 (do ((i (cdr as) (fx- i 1))
                      (x* '() (cons (make-tmp) x*)))
                   ((fx=? i 0) `(lambda (,x* ...) (primcall ,pr ,x* ...)))))]
              [else (error who "unexpected primitive" pr)])]))
 
+  ;;; pass: quote-constants : L4 -> L5
+  ;;;
+  ;;; A simple pass to find raw constants and wrap them in a quote.
+  ;;; c => (quote c)
+  ;;;
+  ;;; Design decision: This could simply be included in the next pass.
+  ;;;
   (define-pass quote-constants : L4 (e) -> L5 ()
     (Expr : Expr (e) -> Expr ()
       [,c `(quote ,c)]))
 
+  ;;; pass: remove-complex-constants : L5 -> L6
+  ;;;
+  ;;; Lifts creation of constants composed of vectors or pairs outside the body
+  ;;; of the program and makes their creation explicit.  In place of the
+  ;;; constants, a temporary variable reference is created.  The total
+  ;;; transform looks something like the following:
+  ;;;
+  ;;; (letrec ([add-pair-parts (lambda (p) (+ (car p) (cdr p)))])
+  ;;;   (+ (add-pair-parts '(4 . 5)) (add-pair-parts '(6 .7)))) =>
+  ;;; (let ([t0 (cons 4 5)] [t1 (cons 6 7)])
+  ;;;   (letrec ([add-pair-parts (lambda (p) (+ (car p) (cdr p)))])
+  ;;;     (+ (add-pair-parts t0) (add-pair-parts t1))))
+  ;;;
+  ;;; Design decision: Another possibility is to simply convert the constants
+  ;;; into their memory-layed out variations, rather than treating it in pieces
+  ;;; like this.  We could extend our C run-time support to know about these
+  ;;; pre-layed out items so that we do not need to construct them when the
+  ;;; program starts running.
+  ;;;
   (define-pass remove-complex-constants : L5 (e) -> L6 ()
     (definitions
+      ;;; t* and e* used to gather up our final constant bindings (via set!)
       (define t* '())
-      (define e* '())
-      (with-output-language (L6 Expr)
+      (define e* '()))
+    (Expr : Expr (e) -> Expr ()
+      (definitions
+        ;;; datum->expr - a helper function for recurring through the parts of
+        ;;; a vector or pair datum to construct its parts, until it reaches the
+        ;;; constants in the leaves of the datum.  We put this definition
+        ;;; within the Expr transformer so that quasiquote will be bound to the
+        ;;; L6:Expr nonterminal creation code.
         (define datum->expr
           (lambda (x)
             (cond
-              [(pair? x)
+              [(pair? x)  ;; if we have a pair, cons its recurred parts.
                `(primcall cons ,(datum->expr (car x)) ,(datum->expr (cdr x)))]
-              [(vector? x)
+              [(vector? x) ;; if we have a vector ...
                (let ([l (vector-length x)] [t (make-tmp)])
+                 ;; 1. create a vector of the proper size
                  `(let ([,t (primcall make-vector (quote ,l))])
                     (begin
+                      ;; 2. set each elemenet in the vector with its recurred
+                      ;;    parts.
                       ,(let loop ([l l] [e* '()])
                          (if (fx=? l 0)
                              e*
@@ -1382,32 +1840,87 @@
                                       ,(datum->expr (vector-ref x l)))
                                    e*)))))
                       ...
+                      ;; and return the vector as the final expression
                       ,t)))]
-              [(constant? x) `(quote ,x)])))))
-    (Expr : Expr (e) -> Expr ()
-      [(quote ,d)
-       (if (constant? d)
-           `(quote ,d)
-           (let ([t (make-tmp)])
+              ;; if it is a constant, simply quote it.
+              [(constant? x) `(quote ,x)]))))
+      [(quote ,d)                    ;; look for quoted constants
+       (if (constant? d)             ;; if they are already simple
+           `(quote ,d)               ;; quote them
+           (let ([t (make-tmp)])     ;; otherwise create a binding for them
              (set! t* (cons t t*))
              (set! e* (cons (datum->expr d) e*))
              t))])
+    ;; in the body, call the Expr transformer, and if t* is null (indicating we
+    ;; did not find any complex constants) don't bother creating the empty let
+    ;; around it.
     (let ([e (Expr e)])
       (if (null? t*)
           e
           `(let ([,t* ,e*] ...) ,e))))
 
+  ;;; pass: identify-assigned-variables : L6 -> L7
+  ;;;
+  ;;; This pass identifies which variables are assigned using set!. This is the
+  ;;; first step in a process known as assignment conversion.  We separate
+  ;;; assigned varaibles from unassigned variables, and assigned variables are
+  ;;; converted into reference cells that can be manipulated through
+  ;;; primitives.  In this compiler, we use the existing box type to create the
+  ;;; cells (using the box primitive), reference the cells (using the unbox
+  ;;; primitive), and mutating the cells (using the set-box! primitive).  One
+  ;;; of the reasons we perform assignment conversion is it allows multiple
+  ;;; closures to capture the same mutable variable and all of the closures
+  ;;; will see the same, up-to-date, value for that variable since they all
+  ;;; simply contain a pointer to the reference cell.  If we didn't do this
+  ;;; conversion, we would need to figure out a different way to handle set! so
+  ;;; that the updates are propagated to all the closures that close over the
+  ;;; variable.  The eventual effect of assignemnt conversion is the following:
+  ;;; (let ([x 5])
+  ;;;   (set! x (+ x 5))
+  ;;;   (+ x x)) =>
+  ;;; (let ([t0 5])
+  ;;;   (let ([x (box t0)])
+  ;;;     (primcall set-box! x (+ (unbox x) 5)
+  ;;;     (+ (unbox x) (unbox x))))
+  ;;; (of course in this example, we could have simply shadowed x)
+  ;;;
+  ;;; This pass, however, is simply an analysis pass.  It gathers up the set of
+  ;;; assigned variables and deposits them in an AssignedBody just inside their
+  ;;; binding points.  The transformation in this pass is:
+  ;;;
+  ;;; (let ([x 5] [y 7] [z 10])
+  ;;;   (set! x (+ x y))
+  ;;;   (+ x z)) =>
+  ;;; (let ([x 5] [y 7] [z 10])
+  ;;;   (assigned (x)
+  ;;;     (set! x (+ x y))
+  ;;;     (+ x z)))
+  ;;;
+  ;;; The key operations we depend on are:
+  ;;; set-cons   - to extend a set with a newly found assigned variable.
+  ;;; intersect  - to determine which assigned variables are bound by a lambda,
+  ;;;              let, or letrec.
+  ;;; difference - to remove assigned variables from a set once we locate their
+  ;;;              binding form.
+  ;;; union      - to gather assigned variables from sub-expressions into a
+  ;;;              single set.
+  ;;; 
+  ;;; Note: we are using a relatively inefficient representation of sets here,
+  ;;; simply representing them as lists and using our set-cons, intersect,
+  ;;; difference, and union procedures to maintain their set-ness.  We could
+  ;;; choose a more efficient set representation, perhaps leveraging insertion
+  ;;; sort or something similar, or we could choose to represent our variables
+  ;;; using a mutable record, with a field to indicate if it is assigned.
+  ;;; Either approach will improve the worst case performance of this pass,
+  ;;; though the mutable record version will get us down to a linear cost,
+  ;;; which is the best case for any pass in the current version of the
+  ;;; nanopass framework.
+  ;;;
   (define-pass identify-assigned-variables : L6 (e) -> L7 ()
     (Expr : Expr (e) -> Expr ('())
-      [(set! ,x ,[e assigned*]) (values `(set! ,x ,e) (cons x assigned*))]
-      [(primcall ,pr ,[e* assigned**] ...)
-       (values `(primcall ,pr ,e* ...) (apply union assigned**))]
-      [(if ,[e0 assigned0*] ,[e1 assigned1*] ,[e2 assigned2*])
-       (values `(if ,e0 ,e1 ,e2) (union assigned0* assigned1* assigned2*))]
-      [(begin ,[e* assigned**] ... ,[e assigned*])
-       (values `(begin ,e* ... ,e) (apply union assigned* assigned**))]
-      [(,[e assigned*] ,[e* assigned**] ...)
-       (values `(,e ,e* ...) (apply union assigned* assigned**))]
+      ;; identify an assigned variable
+      [(set! ,x ,[e assigned*]) (values `(set! ,x ,e) (set-cons x assigned*))]
+      ;; deposit assigned variables at lambda, let, and letrec binding sites
       [(lambda (,x* ...) ,[body assigned*])
        (values
          `(lambda (,x* ...) (assigned (,(intersect x* assigned*) ...) ,body))
@@ -1422,77 +1935,225 @@
          (values
            `(letrec ([,x* ,e*] ...)
               (assigned (,(intersect x* assigned*) ...) ,body))
-           (difference assigned* x*)))])
+           (difference assigned* x*)))]
+      ;; traverse forms with nested expressions to gather up the assignments
+      ;; from each sub-expression.  this could be simplified if the nanopass
+      ;; framework had a way to automatically combine these.
+      [(primcall ,pr ,[e* assigned**] ...)
+       (values `(primcall ,pr ,e* ...) (apply union assigned**))]
+      [(if ,[e0 assigned0*] ,[e1 assigned1*] ,[e2 assigned2*])
+       (values `(if ,e0 ,e1 ,e2) (union assigned0* assigned1* assigned2*))]
+      [(begin ,[e* assigned**] ... ,[e assigned*])
+       (values `(begin ,e* ... ,e) (apply union assigned* assigned**))]
+      [(,[e assigned*] ,[e* assigned**] ...)
+       (values `(,e ,e* ...) (apply union assigned* assigned**))])
+    ;; in the body, call 
     (let-values ([(e assigned*) (Expr e)])
+      (unless (null? assigned*)
+        (error who "found one or more unbound variables" assigned*))
       e))
 
+  ;;; pass: purify-letrec : L7 -> L8
+  ;;;
+  ;;; this pass looks for places where letrec is used to bind something other
+  ;;; than a lambda expression, or where a letrec bound variable is assigned
+  ;;; and moves these bindings into let bindings.  when the pass is done all of
+  ;;; the letrecs in our program will be immutable and bind only lambda
+  ;;; expressions. For instance, the following example:
+  ;;;
+  ;;; (letrec ([f (lambda (g x) (g x))]
+  ;;;          [a 5]
+  ;;;          [b (+ 5 7)]
+  ;;;          [g (lambda (h) (f h 5))]
+  ;;;          [c (let ([x 10]) ((letrec ([zero? (lambda (n) (= n 0))]
+  ;;;                                     [f (lambda (n) 
+  ;;;                                          (if (zero? n)
+  ;;;                                              1
+  ;;;                                              (* n (f (- n 1)))))])
+  ;;;                              f)
+  ;;;                             x))]
+  ;;;          [m 10]
+  ;;;          [z (lambda (x) x)])
+  ;;;   (set! z (lambda (x) (+ x x)))
+  ;;;   (set! m (+ m m))
+  ;;;   (+ (+ (+ (f z a) (f z b)) (f z c)) (g z))))
+  ;;; =>
+  ;;; (let ([z (quote #f)] [m '#f] [c '#f])
+  ;;;   (let ([b (+ '5 '7)] [a '5])
+  ;;;     (letrec ([g (lambda (h) (f h '5))]
+  ;;;              [f (lambda (g x) (g x))])
+  ;;;       (begin
+  ;;;         (set! z (lambda (x) x))
+  ;;;         (set! m '10)
+  ;;;         (set! c
+  ;;;           (let ([x '10])
+  ;;;             ((letrec ([f (lambda (n)
+  ;;;                               (if (zero? n)
+  ;;;                                   '1
+  ;;;                                   (* n (f (- n '1)))))]
+  ;;;                       [zero? (lambda (n) (= n '0))])
+  ;;;                f)
+  ;;;               x)))
+  ;;;         (begin
+  ;;;           (set! z (lambda (x) (+ x x)))
+  ;;;           (set! m (+ m m))
+  ;;;           (+ (+ (+ (f z a) (f z b)) (f z c)) (g z)))))))
+  ;;; 
+  ;;; The algorithm for doing this is fairly simple.  We attempt to separate
+  ;;; the bindings into simple bindings, lambda bindings, and complex bindings.
+  ;;; Simple bindings bind a constant, a variable reference not bound in this
+  ;;; letrec, the call to an effect free primitive, a begin that contains only
+  ;;; simple expressions, or an if that contains only simple expressions to an
+  ;;; immutable variable. The simple? predicate is used for determining when an
+  ;;; expression is simple.  A lambda expression is simply a lambda, and a
+  ;;; complex expression is any other expression.
+  ;;;
+  ;;; Design decision: There are many other approaches that we could use,
+  ;;; including those described in the "Fixing Letrec: A Faithful Yet Efficient
+  ;;; Implementation of Scheme’s Recursive Binding Construct" by Waddell, et.
+  ;;; al. and "Fixing Letrec (reloaded)" by Ghuloum and Dybvig.  Earlier
+  ;;; versions of Chez Scheme used the earlier paper, which documented how to
+  ;;; properly handle R5RS letrecs, and newer versions use the latter paper
+  ;;; which described how to properly handle R6RS letrec and letrec*.
+  ;;;
   (define-pass purify-letrec : L7 (e) -> L8 ()
+    (definitions
+      ;; lambda? - use nanopass case to determine if an L8:Expr is a lambda
+      ;; expression.
+      (define lambda?
+        (lambda (e)
+          (nanopass-case (L8 Expr) e
+            [(lambda (,x* ...) ,abody) #t]
+            [else #f])))
+      ;; simple? - use nanopass case to deteremin if an L8:Expr is a "simple",
+      ;; effect free expression.
+      (define simple?
+        (lambda (x bound* assigned*)
+          (let f ([x x])
+            (nanopass-case (L8 Expr) x
+              [(quote ,c) #t]
+              [,x (not (or (memq x bound*) (memq x assigned*)))]
+              [(primcall ,pr ,e* ...)
+                (and (effect-free-prim? pr) (for-all f e*))]
+              [(begin ,e* ... ,e) (and (for-all f e*) e)]
+              [(if ,e0 ,e1 ,e2) (and (f e0) (f e1) (f e2))]
+              [else #f])))))
     (Expr : Expr (e) -> Expr ()
       (definitions
+        ;; build a let, when there are bindings, otherwise, just return the
+        ;; body.
         (define build-let
           (lambda (x* e* a* body)
             (if (null? x*)
                 body
                 `(let ([,x* ,e*] ...) (assigned (,a* ...) ,body)))))
+        ;; build a letrec, when there are bindings, otherwise, just return the
+        ;; body
         (define build-letrec
           (lambda (x* e* body)
             (if (null? x*)
                 body
                 `(letrec ([,x* ,e*] ...) ,body))))
+        ;; build a begin when we have more then one expression, otherwise just
+        ;; return the one expression.
         (define build-begin
           (lambda (body* body)
             (if (null? body*)
                 body
                 `(begin ,body* ... ,body)))))
       [(letrec ([,x* ,[e*]] ...) (assigned (,a* ...) ,[body]))
+       ;; loop through our bindings, separating them into simple, lambda, and
+       ;; complex.
        (let loop ([xb* x*] [e* e*]
                   [xs* '()] [es* '()]
                   [xl* '()] [el* '()]
                   [xc* '()] [ec* '()])
          (if (null? xb*)
-             (build-let xc* (make-list (length xc*) `(quote #f)) a*
+             ;; when we're done bind the complex bindings to #f, they are now
+             ;; all assigned, then bind the simple bindings, then create a
+             ;; letrec binding for the lambda expressions (eliminate the
+             ;; assigned body, since we know none of them are assigned), and
+             ;; finally use set! to set the values of our complex bindings.
+             (build-let xc* (make-list (length xc*) `(quote #f)) xc*
                (build-let xs* es* '()
                  (build-letrec xl* el*
                    (build-begin
                      (map (lambda (xc ec) `(set! ,xc ,ec)) xc* ec*)
                      body))))
              (let ([x (car xb*)] [e (car e*)])
-               (nanopass-case (L8 Expr) e
-                 [(lambda (,x* ...) ,abody)
-                  (guard (not (memq x a*)))
+               (cond
+                 [(and (not (memq x a*)) (lambda? e))
                   (loop (cdr xb*) (cdr e*) xs* es*
                     (cons x xl*) (cons e el*) xc* ec*)]
-                 [,x
-                  (guard (not (memq x x*)) (not (memq x a*)))
-                  (loop (cdr xb*) (cdr e*) (cons x xs*) (cons e es*)
-                    xl* el* xc* ec*)]
-                 [(primcall ,pr ,e* ...)
-                  (guard (effect-free-prim? pr) (memq x a*))
+                 [(and (not (memq x a*)) (simple? e x* a*))
                   (loop (cdr xb*) (cdr e*) (cons x xs*) (cons e es*)
                     xl* el* xc* ec*)]
                  [else (loop (cdr xb*) (cdr e*) xs* es* xl* el*
                          (cons x xc*) (cons e ec*))]))))]))
 
+  ;;; pass: optimize-direct-call : L8 -> L8
+  ;;;
+  ;;; one of our simplest optimizations, we convert a directly applied lambdas
+  ;;; into a let.  this allows us to avoid the creation of a closure for the
+  ;;; let, and allows us instead to create a local binding within a function.
+  ;;; the transform is simple:
+  ;;;
+  ;;; ((lambda (x* ...) body) e* ...) => (let ([x* e*] ...) body)
+  ;;; where (length x*) == (length e*)
+  ;;; 
   (define-pass optimize-direct-call : L8 (e) -> L8 ()
     (Expr : Expr (e) -> Expr ()
       [((lambda (,x* ...) ,[abody]) ,[e* -> e*] ...)
        (guard (fx=? (length x*) (length e*)))
        `(let ([,x* ,e*] ...) ,abody)]))
 
+  ;;; pass: find-let-bound-lambdas : L8 -> L8
+  ;;;
+  ;;; this pass looks for places where let is used to bind a lambda expression
+  ;;; to an immutable variable and converts this binding into a letrec binding.
+  ;;; Part of the reason we can do this here, is because we have uniquely named
+  ;;; each of our variables and none of these variables can be referenced in
+  ;;; the right-hand side of the let bindings.  If it was still possible for
+  ;;; variables to have same name, this would not be a legal transformation,
+  ;;; since it might cause a lambda that did not capture a variable bound in
+  ;;; this let to bind the variable in the resulting letrec.  The
+  ;;; transformation looks like:
+  ;;;
+  ;;; (let ([x 5] [f (lambda (n) (+ n n))] [g (lambda (x) x)] [m 10])
+  ;;;   (assigned (g m)
+  ;;;     body)) =>
+  ;;; (let ([x 5] [g (lambda (x) x)] [m 10])
+  ;;;   (assigned (g m)
+  ;;;     (letrec ([f (lambda (n) (+ n n))])
+  ;;;       body)))
+  ;;;
+  ;;; Design decisions: Handling of let can be incorporated into the handling
+  ;;; of letrec, either through one of the algorithms described in the design
+  ;;; decisions of the purify-letrec pass, or in the existing letrec pass. It
+  ;;; is kept separate here, largely to make the letrec pass more straight
+  ;;; forward to understand.
+  ;;; 
   (define-pass find-let-bound-lambdas : L8 (e) -> L8 ()
     (Expr : Expr (e) -> Expr ()
       (definitions
+        ;; build-let - constructs a let if any variables are bound by the let,
+        ;; or simply returns the body if there are no bindings.
         (define build-let
           (lambda (x* e* a* body)
             (if (null? x*)
                 body
                 `(let ([,x* ,e*] ...) (assigned (,a* ...) ,body)))))
+        ;; build-letrec - constructs a letrec if any variables are bound by the
+        ;; letrec, or simple returns the body if there are no bindings.
         (define build-letrec
           (lambda (x* le* body)
             (if (null? x*)
                 body
                 `(letrec ([,x* ,le*] ...) ,body)))))
       [(let ([,x* ,[e*]] ...) (assigned (,a* ...) ,[body]))
+       ;; executes a similar algorithm to the purify-letrec pass, though it
+       ;; does not separate simple from complex bindings, since we currently
+       ;; handle both in the let.
        (let loop ([xb* x*] [e* e*] [xl* '()] [el* '()] [xo* '()] [eo* '()])
          (if (null? xb*)
              (build-let xo* eo* a* (build-letrec xl* el* body))
@@ -1504,29 +2165,97 @@
                  [else (loop (cdr xb*) (cdr e*) xl* el*
                          (cons x xo*) (cons e eo*))]))))]))
 
+  ;;; pass: remove-anonymous-lambda : L8 -> L9
+  ;;;
+  ;;; since we are generating a C function for each Scheme lambda, we need to
+  ;;; have a name for each of these lambdas.  In addition we need a name to use
+  ;;; as the code pointer label, so that we can lift the lambdas to the top
+  ;;; level of the program.  The transformation is fairly simple.  If we find a
+  ;;; lambda in expression position (i.e. not in the right-hand side of a
+  ;;; letrec binding) then we wrap a letrec around it that gives it a new name.
+  ;;;
+  ;;; (letrec ([l* (lambda (x** ...) body*)] ...) body) => (no change)
+  ;;; (letrec ([l* (lambda (x** ...) body*)] ...) body)
+  ;;;
+  ;;; (lambda (x* ...) body) => (letrec ([t0 (lambda (x* ...) body)]) t0)
+  ;;;
   (define-pass remove-anonymous-lambda : L8 (e) -> L9 ()
     (Expr : Expr (e) -> Expr ()
       [(lambda (,x* ...) ,[abody])
        (let ([t (make-tmp)])
          `(letrec ([,t (lambda (,x* ...) ,abody)]) ,t))]))
 
+  ;;; pass: convert-assignments : L9 -> L10
+  ;;;
+  ;;; this pass completes the assignment conversion process that we started in
+  ;;; identify-assigned-variables. We use the assigned variable list through
+  ;;; our previous passes to make decisions about how bindings were separated.
+  ;;; Now, we are ready to change these explicitly to the box, unbox, and
+  ;;; set-box!  primitive calls described in the identified-assigned-variable
+  ;;; pass.  We also introduce new temporaries to contain the value that will
+  ;;; be put in the box.  this is largely because we don't want our
+  ;;; representation of assigned variables to be observable from inside the
+  ;;; program, and if we were to introduce an operator like call/cc to our
+  ;;; implementation, then the order our variables were setup could potentially
+  ;;; be identified by seeing that the allocation and computation of the values
+  ;;; are intermixed.  Instead, we want all the computation to happen, then the
+  ;;; allocation, and then the allocated locations are updated with the values.
+  ;;;
+  ;;; Our transform thus looks like the following:
+  ;;;
+  ;;; (let ([x0 e0] [x1 e1] ... [xa0 ea0] [xa1 xa0] ...)
+  ;;;   (assigned (xa0 xa1 ...)
+  ;;;     body))
+  ;;; =>
+  ;;; (let ([x0 e0] [x1 e1] ... [t0 ea0] [t1 ea1] ...)
+  ;;;   (let ([xa0 (primcall box t0)] [xa1 (primcall box t1)] ...)
+  ;;;     body^))
+  ;;;
+  ;;; (lambda (x0 x1 ... xa0 xa1 ...) (assigned (xa0 xa1 ...) body))
+  ;;; =>
+  ;;; (lambda (x0 x1 ... t0 t1 ...)
+  ;;;   (let ([xa0 (primcall box t0)] [xa1 (primcall box t1)] ...)
+  ;;;     body^))
+  ;;;
+  ;;; where 
+  ;;; (set! xa0 e) => (primcall set-box! xa0 e^)
+  ;;; and 
+  ;;; xa0 => (primcall unbox xa0)
+  ;;; in body^ and e^
+  ;;;
+  ;;; We could choose another data structure, or even create a new data
+  ;;; structure to perform the conversion with, however, we've choosen the box
+  ;;; because it contains exactly one cell, and takes up just one word in
+  ;;; memory, where as our pair and vector take at least two words in memory.
+  ;;; This decision might be different if we had other constraints on how we
+  ;;; lay out memory.
+  ;;;
   (define-pass convert-assignments : L9 (e) -> L10 ()
     (definitions
+      ;; lookup - looks for assigned variables in the environment and maps them
+      ;; to their temporaries.
       (define lookup
         (lambda (env)
           (lambda (x)
             (cond
               [(assq x env) => cdr]
               [else x]))))
+      ;; build-env - generates temporaries, extends the environment, and
+      ;; returns the final list of unassigned binding variables, the list of
+      ;; emporaries, and the updated environment, through the call to f
       (define build-env
         (lambda (x* a* env f)
           (let ([t* (map (lambda (x) (make-tmp)) a*)])
             (let ([env (append (map cons a* t*) env)])
               (f (map (lookup env) x*) t* env)))))
       (with-output-language (L10 Expr)
+        ;; make-boxes - build the calls to box to create the storage locations
+        ;; for our assigned variables.
         (define make-boxes
           (lambda (t*)
             (map (lambda (t) `(primcall box ,t)) t*)))
+        ;; build-let - builds a let if there are any bindings, or returns the
+        ;; body if there are none.
         (define build-let
           (lambda (x* e* body)
             (if (null? x*)
@@ -1550,16 +2279,38 @@
              `(lambda (,x* ...)
                 (let ([,a* ,box*] ...) ,body)))))]))
   
+  ;;; pass: uncover-free : L10 -> L11
+  ;;;
+  ;;; this pass performs the first step in closure conversion, determining the
+  ;;; set of free-variables for each lambda expression.  this list of free
+  ;;; variables is an approximation of the values that need to be available to
+  ;;; a procedure as its captured environment when a procedure is executed.
+  ;;; there are numerous ways to shrink, or even eliminate this list, but in
+  ;;; this compiler we are currently skipping any of these steps, and simply
+  ;;; taking this set of free variables as the set we need to capture.  (For
+  ;;; one possible closure optimization technique see "Optimizing Flat
+  ;;; Closures" by Keep et. al. or Chapter 4. of "A Nanopass Compiler for
+  ;;; Commercial Compiler Development" by Keep).  This is an analysis pass,
+  ;;; so we are just gathering up the free variables.  This will look somewhat
+  ;;; similar to the identify-assigned-variables, except we care about all
+  ;;; variable references, but only the free variables at lambdas. 
+  ;;;
   (define-pass uncover-free : L10 (e) -> L11 ()
     (Expr : Expr (e) -> Expr (free*)
+      ;; quoted constants have no variable references
       [(quote ,c) (values `(quote ,c) '())]
+      ;; gather up variable references
       [,x (values x (list x))]
+      ;; if we find a let or a letrec remove the bound variables from the list
+      ;; of references.
       [(let ([,x* ,[e* free**]] ...) ,[e free*])
        (values `(let ([,x* ,e*] ...) ,e)
          (apply union (difference free* x*) free**))]
       [(letrec ([,x* ,[le* free**]] ...) ,[body free*])
        (values `(letrec ([,x* ,le*] ...) ,body)
          (difference (apply union free* free**) x*))]
+      ;; in all the other cases, we simply want to gather up the 
+      ;; variable references from each sub expression
       [(if ,[e0 free0*] ,[e1 free1*] ,[e2 free2*])
        (values `(if ,e0 ,e1 ,e2) (union free0* free1* free2*))]
       [(begin ,[e* free**] ... ,[e free*])
@@ -1569,9 +2320,15 @@
       [(,[e free*] ,[e* free**] ...)
        (values `(,e ,e* ...) (apply union free* free**))])
     (LambdaExpr : LambdaExpr (le) -> LambdaExpr (free*)
+      ;; at the lambda expression, remove our bound variables, everything else
+      ;; is free.  we continue to return the free variables until we find their
+      ;; binding forms.
       [(lambda (,x* ...) ,[body free*])
        (let ([free* (difference free* x*)])
          (values `(lambda (,x* ...) (free (,free* ...) ,body)) free*))])
+    ;; in the body, we kick off with the Expr call, and make sure that we have
+    ;; an empty free list when we reach the top, because we expect our programs
+    ;; to be self-contained with no free-references.
     (let-values ([(e free*) (Expr e)])
       (unless (null? free*) (error who "found unbound variables" free*))
       e))
@@ -1715,6 +2472,12 @@
          [(true) p1]
          [(false) p2]
          [else `(if ,p0 ,p1 ,p2)])]
+      [(,[se] ,[se*] ...)
+       (let ([t (make-tmp)])
+         `(if (let ([,t (,se ,se* ...)])
+                (primcall = ,t (quote #f)))
+              (false)
+              (true)))]
       [(primcall ,pr ,[se*] ...)
        (guard (predicate-primitive? pr))
        `(primcall ,pr ,se* ...)]
@@ -1857,23 +2620,60 @@
       [(alloc ,i ,[se]) `(set! ,x (alloc ,i ,se))]
       [(,[se] ,[se*] ...) `(set! ,x (,se ,se* ...))]))   
 
-  (define-pass push-if : L19 (e) -> L20 ()
-    (Value : Value (v) -> Value ()
-      (definitions
-        (define build-begin
-          (lambda (e* v)
-            (if (null? e*) v `(begin ,e* ... ,v)))))
-      [(if ,[p0 e*] ,[v1] ,[v2]) (build-begin e* `(if ,p0 ,v1 ,v2))])
-    (Effect : Effect (e) -> Effect ()
-      (definitions
-        (define build-begin
-          (lambda (e* e)
-            (if (null? e*) e `(begin ,e* ... ,e)))))
-      [(if ,[p0 e*] ,[e1] ,[e2]) (build-begin e* `(if ,p0 ,e1 ,e2))])
-    (Predicate : Predicate (p) -> Predicate ('())
-      [(begin ,[e*] ... ,[p more-e*]) (values p (append e* more-e*))]))
+  ;;; pass: push-if : L19 -> L20
+  ;;;
+  ;;; It turns out I was a little overzealous with this pass and didn't quite
+  ;;; handle all of the cases.  In particular, in my hustle, I did not think
+  ;;; about the `(if p0 p1 p2) where the result expressions contain effects...
+  ;;; i.e.  (if (begin ,e0* ...  ,p0) (begin ,e1* ...  ,p1) (begin ,e2* ...
+  ;;; ,p2)) can only be handled if:
+  ;;;   1. we are willing to copy the code for the tail of our ifs (we aren't,
+  ;;;      this can lead to exponential code explosion) or
+  ;;;   2. if we are willing to flatten this code and use labels and gotos in
+  ;;;      our generated code.
+  ;;; Number 2 is a more reasonable solution, but lucky for us, C will allow us
+  ;;; to generate code like the following:
+  ;;; 
+  ;;; (if (begin ,e0* ... ,p0) (begin ,e1* ... ,p1) (begin ,e2* ... ,p2)) =>
+  ;;;
+  ;;; (((e0*[0]), (e0*[1]), ..., (e0*[n]), p0) ?
+  ;;;   ((e1*[0]), (e1*[1]), ..., (e1*[n]), p1) :
+  ;;;   ((e2*[0]), (e2*[1]), ..., (e2*[n]), p2))
+  ;;;
+  ;;; I've left the pass here as an example that even when we think we've got a
+  ;;; pass written and working, it easy to miss things, which is why we test,
+  ;;; and why we need to think carefully as we work through the compiler.
+  ;;;
+  ; (define-pass push-if : L19 (e) -> L20 ()
+  ;   (Value : Value (v) -> Value ()
+  ;     (definitions
+  ;       (define build-begin
+  ;         (lambda (e* v)
+  ;           (if (null? e*) v `(begin ,e* ... ,v)))))
+  ;     [(if ,[p0 e*] ,[v1] ,[v2]) (build-begin e* `(if ,p0 ,v1 ,v2))])
+  ;   (Effect : Effect (e) -> Effect ()
+  ;     (definitions
+  ;       (define build-begin
+  ;         (lambda (e* e)
+  ;           (if (null? e*) e `(begin ,e* ... ,e)))))
+  ;     [(if ,[p0 e*] ,[e1] ,[e2]) (build-begin e* `(if ,p0 ,e1 ,e2))])
+  ;   (Predicate : Predicate (p) -> Predicate ('())
+  ;     [(begin ,[e*] ... ,[p more-e*]) (values p (append e* more-e*))]
+  ;     [(if ,[p0 e0*] ,[p1 e1*] ,[p2 e2*])
+  ;      (values `(if ,p0 (begin ,e1* ... p1) (begin ,e2* ... ,p2)) e0*)]))
  
-  (define-pass specify-constant-representation : L20 (e) -> L21 ()
+  ;;; pass: specify-constant-representation : L19 -> L21
+  ;;;
+  ;;; This pass replaces our quoted constants with the explicit ptr
+  ;;; representation we've decided to use.  This effectively replaces each of our
+  ;;; constants with a 64-bit integer.  The conversion is pretty simple:
+  ;;;
+  ;;; #f     => false-rep
+  ;;; #t     => true-rep
+  ;;; '()    => null-rep
+  ;;; fixnum => fixnum << fixnum-shift (yielding 64-bit integer)
+  ;;;
+  (define-pass specify-constant-representation : L19 (e) -> L21 ()
     (SimpleExpr : SimpleExpr (se) -> SimpleExpr ()
       [(quote ,c)
        (cond
@@ -1883,7 +2683,47 @@
          [(target-fixnum? c)
           (bitwise-arithmetic-shift-left c fixnum-shift)])]))
 
+  ;;; pass: expand-primitives : L21 -> L22
+  ;;;
+  ;;; this pass expands our Scheme primitives into something close to their
+  ;;; C-language equivalents.  This changes our math primitives to do the
+  ;;; adjustments required by changing the representation of fixnums (it works
+  ;;; fine for + and -, but * and / require us to do some shifting in order to
+  ;;; have a fixnum as a result).  We also translate all of our memory
+  ;;; referencing primitives to mrefs and memory setting primitives into
+  ;;; msets!.  When we generate C code for these, we will do the pointer
+  ;;; arithmetic required and then dereference the calculated address.
+  ;;; Remember, that because of our tags, we need to do some pointer arithmetic
+  ;;; for any dereference we wish to perform.  This pointer arithmetic, though,
+  ;;; can be handled in a single memory reference argument on an x86_64 (which
+  ;;; is our assumed target platform).
+  ;;;
+  ;;; Design decision: Right now each of our "instructions" is a separate form
+  ;;; in the language, however, if we were to extend our source language and
+  ;;; primitive set much farther, it is likely that we would want to revisit
+  ;;; this to choose a representation where a single form could represent
+  ;;; several of these instructions.  This might also be desirable if we change
+  ;;; the representation to LLVM or asm.js.
+  ;;;;
   (define-pass expand-primitives : L21 (e) -> L22 ()
+    #;(Value : Value (v) -> Value ()
+      (definitions
+        (define build-begin
+          (lambda (e* v)
+            (nanopass-case (L22 Value) v
+              [(begin ,e1* ... ,v) 
+               (build-begin (append e* e1*) v)]
+              [else
+               (let loop ([e* e*] [re* '()])
+                 (if (null? e*)
+                     `(begin ,(reverse re*) ... ,v)
+                     (let ([e (car e*)])
+                       (nanopass-case (L22 Effect) e
+                         [(nop) (loop (cdr e*) re*)]
+                         [(begin ,e0* ... ,e0)
+                          (loop (append e0* (cons e0 (cdr e*))) re*)]
+                       [else (loop (cdr e*) (cons (car e*) re*))]))))]))))
+      [(begin ,[e*] ... ,[v]) (build-begin e* v)])
     (Rhs : Rhs (rhs) -> Rhs ()
       [(primcall ,vpr)
        (case vpr
@@ -1903,15 +2743,34 @@
          [(vector-ref) `(mref ,se0 ,se1 ,(- word-size vector-tag))]
          [(+) `(add ,se0 ,se1)]
          [(-) `(subtract ,se0 ,se1)]
+         ;; when we multiply or divide, we need to shift either one of the
+         ;; arguments or the result. we could also be a bit more clever here,
+         ;; if one of the arguments is a constant, we can perform the shift
+         ;; ahead of time (assuming the constant still fits within the 64-bit
+         ;; width
          [(*) `(multiply ,se0 (shift-right ,se1 ,fixnum-shift))]
-         [(/) `(shift-left (divide
-                             (shift-right ,se0 ,fixnum-shift)
-                             (shift-right ,se1 ,fixnum-shift))
-                 ,fixnum-shift)]
+         [(/) `(shift-left (divide ,se0 ,se1) ,fixnum-shift)]
          [else (error who "unexpected value primitive" vpr)])]
       [(primcall ,vpr ,se* ...)
        (error who "unexpected value primitive" vpr)])
     (Effect : Effect (e) -> Effect ()
+      #;(definitions
+        (define build-begin
+          (lambda (e* e)
+            (nanopass-case (L22 Effect) e
+              [(begin ,e1* ... ,e) 
+               (build-begin (append e* e1*) e)]
+              [else
+               (let loop ([e* e*] [re* '()])
+                 (if (null? e*)
+                     `(begin ,(reverse re*) ... ,e)
+                     (let ([e (car e*)])
+                       (nanopass-case (L22 Effect) e
+                         [(nop) (loop (cdr e*) re*)]
+                         [(begin ,e0* ... ,e0)
+                          (loop (append e0* (cons e0 (cdr e*))) re*)]
+                       [else (loop (cdr e*) (cons (car e*) re*))]))))]))))
+      #;[(begin ,[e*] ... ,[e]) (build-begin e* e)]
       [(primcall ,epr ,[se0] ,[se1])
        (case epr
          [(box-set!) `(mset! ,se0 #f ,(- box-tag) ,se1)]
@@ -1929,6 +2788,23 @@
       [(primcall ,epr ,se* ...)
        (error who "unexpected effect primitive" epr)])
     (Predicate : Predicate (p) -> Predicate ()
+      #;(definitions
+        (define build-begin
+          (lambda (e* p)
+            (nanopass-case (L22 Predicate) p
+              [(begin ,e1* ... ,p) 
+               (build-begin (append e* e1*) p)]
+              [else
+               (let loop ([e* e*] [re* '()])
+                 (if (null? e*)
+                     `(begin ,(reverse re*) ... ,p)
+                     (let ([e (car e*)])
+                       (nanopass-case (L22 Effect) e
+                         [(nop) (loop (cdr e*) re*)]
+                         [(begin ,e0* ... ,e0)
+                          (loop (append e0* (cons e0 (cdr e*))) re*)]
+                       [else (loop (cdr e*) (cons (car e*) re*))]))))]))))
+      #;[(begin ,[e*] ... ,[p]) (build-begin e* p)]
       [(primcall ,ppr ,[se])
        (case ppr
          [(pair?) `(= (logand ,se ,pair-mask) ,pair-tag)]
@@ -1948,8 +2824,21 @@
       [(primcall ,ppr ,se* ...)
        (error who "unexpected predicate primitive" ppr)]))
 
+  ;;; pass: generate-C : L22 -> printed-output
+  ;;;
+  ;;; this pass takes a program in the L22 language and produces a printed C
+  ;;; program.  using a string or file port, the results of this can be
+  ;;; captured in a string or sent to a file to be compiled.  The code that it
+  ;;; produces can be a little difficult to read, particularly with all of the
+  ;;; casts to and from ptr values.
+  ;;;
+  ;;; TODO: this pass is fairly convoluted, and could use some refactoring.  We
+  ;;;       might also want to try to pretty-print the C code so that it prints
+  ;;;       out a bit better.
+  ;;;
   (define-pass generate-c : L22 (e) -> * ()
     (definitions
+      ;;; symbol->c-id - converts any Scheme symbol into a valid C identifier.
       (define symbol->c-id
         (lambda (sym)
           (let ([ls (string->list (symbol->string sym))])
@@ -1965,6 +2854,8 @@
                                  c
                                  #\_))
                         (cdr ls)))))))))
+      ;;; emit-function-header - generates a function header to be used in the
+      ;;; declaration of a function or the definition of a function.
       (define emit-function-header
         (lambda (l x*)
           (printf "ptr ~a(" l)
@@ -1977,20 +2868,24 @@
                     (loop (car x*) (cdr x*))))))
 
           (printf ")"))))
+    ;; transformer to print our function declarations
     (emit-function-decl : LambdaExpr (le l) -> * ()
       [(lambda (,x* ...) ,lbody)
        (emit-function-header l x*)
        (printf ";~%")])
+    ;; transformer to print our function definitions
     (emit-function-def : LambdaExpr (le l) -> * ()
       [(lambda (,x* ...) ,lbody)
        (emit-function-header l x*)
        (printf " {~%")
        (emit-function-body lbody)
        (printf "}~%~%")])
+    ;; transformer to emit the body of a function
     (emit-function-body : LocalsBody (lbody) -> * ()
       [(locals (,x* ...) ,body)
        (for-each (lambda (x) (printf "  ptr ~a;~%" (symbol->c-id x))) x*)
        (emit-value body x*)])
+    ;; transformer to emit expressions in value context
     (emit-value : Value (v locals*) -> * ()
       [(if ,p0 ,v1 ,v2)
        (printf "  if (~a) {~%" (format-predicate p0))
@@ -2003,6 +2898,7 @@
        (emit-value v locals*)]
       [,rhs (let ([rhs (format-rhs rhs)])
               (printf "  return (ptr)~a;\n" rhs))])
+    ;; transformer to format Predicate expressions into strings
     (format-predicate : Predicate (p) -> * (str)
       [(if ,p0 ,p1 ,p2)
        (format "((~a) ? (~a) : (~a))"
@@ -2022,7 +2918,64 @@
          (format-simple-expr se0)
          (format-simple-expr se1))]
       [(true) "1"]
-      [(false) "0"])
+      [(false) "0"]
+      [(begin ,e* ... ,p)
+       (let loop ([e* e*] [str ""])
+         (if (null? e*)
+             (string-append str (format-predicate p))
+             (loop (cdr e*)
+               (string-append str (format-effect (car e*)) ", "))))])
+    ;; transformer to format effects in predicate context into strings
+    (format-effect : Effect (e) -> * (str)
+      [(if ,p0 ,e1 ,e2)
+       (format "((~a) ? (~a) : (~a))"
+         (format-predicate p0)
+         (format-effect e1)
+         (format-effect e2))]
+      [((label ,l) ,se* ...)
+       (format "~a(~a)" (symbol->c-id l)
+         (let f ([se* se*])
+           (if (null? se*)
+               ""
+               (let ([se (car se*)] [se* (cdr se*)])
+                 (format "~a~a~a"
+                   (format-simple-expr se)
+                   (if (null? se*) "" ", ")
+                   (f se*))))))]
+      [(,se ,se* ...)
+       (format "((ptr (*)(~a))~a)(~a)"
+         (let f ([i (length se*)])
+           (cond
+             [(fxzero? i) ""]
+             [(fx=? i 1) "ptr"]
+             [else (format "ptr, ~a" (f (fx- i 1)))]))
+         (format-simple-expr se)
+         (let f ([se* se*])
+           (if (null? se*)
+               ""
+               (let ([se (car se*)] [se* (cdr se*)])
+                 (format "~a~a~a"
+                   (format-simple-expr se)
+                   (if (null? se*) "" ", ")
+                   (f se*))))))]
+      [(set! ,x ,rhs) (format "~a = (ptr)~a" (symbol->c-id x) (format-rhs rhs))]
+      [(nop) "0"]
+      [(begin ,e* ... ,e)
+       (let f ([e* e*])
+         (if (null? e*)
+             (format-effect e)
+             (string-append
+               (format-effect (car e*))
+               ", "
+               (f (cdr e*)))))]
+      [(mset! ,se0 ,se1? ,i ,se2)
+       (if se1?
+           (format "((*((ptr*)((long)~a + (long)~a + ~d))) = (ptr)~a)"
+             (format-simple-expr se0) (format-simple-expr se1?)
+             i (format-simple-expr se2))
+           (format "((*((ptr*)((long)~a + ~d))) = (ptr)~a)"
+             (format-simple-expr se0) i (format-simple-expr se2)))])
+    ;; formats simple expressions in to strings
     (format-simple-expr : SimpleExpr (se) -> * (str)
       [,x (symbol->c-id x)]
       [,i (number->string i)]
@@ -2061,6 +3014,7 @@
              (format-simple-expr se0)
              (format-simple-expr se1?) i)
            (format "(*((ptr)((long)~a + ~d)))" (format-simple-expr se0) i))])
+    ;; prints expressions in effect position into C statements
     (emit-effect : Effect (e) -> * ()
       [(if ,p0 ,e1 ,e2)
        (printf "  if (~a) {~%" (format-predicate p0))
@@ -2082,7 +3036,7 @@
        (printf "  ((ptr (*)(~a))~a)("
          (let loop ([i (length se*)])
            (cond
-             [(zero? i) ""]
+             [(fxzero? i) ""]
              [(fx=? i 1) "ptr"]
              [else (format "ptr, ~a" (loop (fx- i 1)))]))
          (format-simple-expr se))
@@ -2108,6 +3062,7 @@
              i (format-simple-expr se2))
            (printf "(*((ptr*)((long)~a + ~d))) = (ptr)~a;\n"
              (format-simple-expr se0) i (format-simple-expr se2)))])
+    ;; formats the right-hand side of a set! into a C expression
     (format-rhs : Rhs (rhs) -> * (str)
       [((label ,l) ,se* ...)
        (format "  ~a(~a)" (symbol->c-id l)
@@ -2139,34 +3094,59 @@
            (format "(ptr)((long)malloc(~a) + ~dl)"
              (format-simple-expr se) i))]
       [,se (format-simple-expr se)])
+    ;; emits a C program for our progam expression
     (Program : Program (p) -> * ()
       [(labels ([,l* ,le*] ...) ,l)
        (let ([l (symbol->c-id l)] [l* (map symbol->c-id l*)])
-         (printf "#include <stdio.h>\n")
-         (if (use-boehm?)
-             (printf "#include <gc.h>\n")
-             (printf "#include <stdlib.h>\n"))
-         (printf "typedef long* ptr;\n")
-         (printf "#define PAIR_P(x) (((long)x & ~d) == ~d)\n"
-           pair-mask pair-tag)
+         (define-syntax emit-include
+           (syntax-rules ()
+             [(_ name) (printf "~s\n" 'name)]))
+         (define-syntax emit-predicate
+           (syntax-rules ()
+             [(_ PRED_P mask tag)
+              (emit-c-macro PRED_P (x) "(((long)x & ~d) == ~d)" mask tag)]))
+         (define-syntax emit-c-macro
+           (lambda (x)
+             (syntax-case x()
+               [(_ NAME (x* ...) fmt args ...)
+                #'(printf "#define NAME(xlist) ~a" (format fmt args ...))])))
+         ;; the following printfs output the tiny C runtime we are using
+         ;; to wrap the result of our compiled Scheme program.
+         (printf "#include <stdio.h>\n\
+                  ~a\n\
+                  typedef long* ptr;\n\
+                 "
+                 (if (use-boehm?) "#include <gc.h>" "#include <stdlib.h>"))
+         (printf "#define FIXNUM_P(x) (((long)x & ~d) == ~d)\n" fixnum-mask fixnum-tag)
+         (printf "#define FIX(x) ((long)x << ~d)\n" fixnum-shift)
+         (printf "#define UNFIX(x) ((long)x >> ~d)\n" fixnum-shift)
+         (printf "#define PAIR_P(x) (((long)x & ~d) == ~d)\n" pair-mask pair-tag)
+         (printf "#define BOX_P(x) (((long)x & ~d) == ~d)\n" box-mask box-tag)
+         (printf "#define UNBOX(x) ((ptr)*((ptr)((long)x - ~d)))\n" box-tag)
+         (printf "#define VECTOR_P(x) (((long)x & ~d) == ~d)\n" vector-mask vector-tag)
+         (printf "#define VECTOR_LENGTH_S(x) ((long)*((ptr)((long)x - ~d)))\n" vector-tag)
+         (printf "#define VECTOR_LENGTH_C(x) UNFIX(((long)*((ptr)((long)x - ~d))))\n" vector-tag)
+         (printf "#define VECTOR_REF(x,i) ((ptr)*((ptr)((long)x + ((i + 1) * ~d) - ~d)))\n" word-size vector-tag)
+         (printf "#define TRUE_P(x) ((long)x == ~d)\n" true-rep)
+         (printf "#define FALSE_P(x) ((long)x == ~d)\n" false-rep)
          (printf "#define NULL_P(x) ((long)x == ~d)\n" null-rep)
+         (printf "#define VOID_P(x) ((long)x == ~d)\n" void-rep)
          (printf "#define CAR(x) ((ptr)*((ptr)((long)x - ~d)))\n" pair-tag)
-         (printf "#define CDR(x) ((ptr)*((ptr)((long)x + ~d - ~d)))\n"
-           word-size pair-tag)
+         (printf "#define CDR(x) ((ptr)*((ptr)((long)x + ~d - ~d)))\n" word-size pair-tag)
+         (printf "#define PROCEDURE_P(x) (((long)x & ~d) == ~d)\n" closure-mask closure-tag)
          (printf "void print_scheme_value(ptr x) {\n")
-         (printf "  long i, vecbytes;\n")
+         (printf "  long i, veclen;\n")
          (printf "  ptr p;\n")
-         (printf "  if ((long)x == ~d) {\n" true-rep)
+         (printf "  if (TRUE_P(x)) {\n")
          (printf "    printf(\"#t\");\n")
-         (printf "  } else if ((long)x == ~d) {\n" false-rep)
+         (printf "  } else if (FALSE_P(x)) {\n")
          (printf "    printf(\"#f\");\n")
          (printf "  } else if (NULL_P(x)) {\n")
          (printf "    printf(\"()\");\n")
-         (printf "  } else if ((long)x == ~d) {\n" void-rep)
+         (printf "  } else if (VOID_P(x)) {\n")
          (printf "    printf(\"(void)\");\n")
-         (printf "  } else if (((long)x & ~d) == ~d) {\n"
-           fixnum-mask fixnum-tag)
-         (printf "    printf(\"%ld\", ((long)x >> ~d));\n" fixnum-shift)
+         (printf "  } else if (FIXNUM_P(x)) {\n")
+         (printf "    printf(\"%ld\", UNFIX(x));\n")
          (printf "  } else if (PAIR_P(x)) {\n")
          (printf "    printf(\"(\");\n")
          (printf "    for (p = x; PAIR_P(p); p = CDR(p)) {\n")
@@ -2180,25 +3160,19 @@
          (printf "      print_scheme_value(p);\n")
          (printf "      printf(\")\");\n")
          (printf "    }\n")
-         (printf "  } else if (((long)x & ~d) == ~d) {\n" box-mask box-tag)
+         (printf "  } else if (BOX_P(x)) {\n")
          (printf "    printf(\"#(box \");\n")
-         (printf "    print_scheme_value((ptr)*((ptr)((long)x - ~d)));\n"
-           box-tag)
+         (printf "    print_scheme_value(UNBOX(x));\n")
          (printf "    printf(\")\");\n")
-         (printf "  } else if (((long)x & ~d) == ~d) {\n"
-           vector-mask vector-tag)
-         (printf "    // printf(\"got vector %p\\n\", x);\n")
-         (printf "    vecbytes = (long)*((ptr)((long)x - ~d));\n" vector-tag)
-         (printf "    //printf(\"vecbytes: %ld\\n\", vecbytes);\n")
+         (printf "  } else if (VECTOR_P(x)) {\n")
+         (printf "    veclen = VECTOR_LENGTH_C(x);\n")
          (printf "    printf(\"#(\");\n")
-         (printf "    for (i = (~d - ~d); i <= vecbytes; i += ~d) {\n"
-           word-size vector-tag word-size)
-         (printf "      print_scheme_value((ptr)*((ptr)((long)x + i)));\n")
-         (printf "      if (i < vecbytes) { printf(\" \"); } \n")
+         (printf "    for (i = 0; i < veclen; i += 1) {\n")
+         (printf "      print_scheme_value(VECTOR_REF(x,i));\n")
+         (printf "      if (i < veclen) { printf(\" \"); } \n")
          (printf "    }\n")
          (printf "    printf(\")\");\n")
-         (printf "  } else if (((long)x & ~d) == ~d) {\n"
-           closure-mask closure-tag)
+         (printf "  } else if (PROCEDURE_P(x)) {\n")
          (printf "    printf(\"#(procedure)\");\n")
          (printf "  }\n")
          (printf "}\n")
@@ -2210,23 +3184,23 @@
          (printf "  return 0;\n")
          (printf "}\n"))]))
 
-  ;; a little helper mostly shamelesly stolen from 
-  ;; the Chez Scheme User's Guide
+  ;;; a little helper mostly shamelesly stolen from 
+  ;;; the Chez Scheme User's Guide
   (define-syntax with-implicit
     (syntax-rules ()
       [(_ (tid id ...) body0 ... body1)
        (with-syntax ([id (datum->syntax #'tid 'id)] ...)
          body0 ... body1)]))
 
-  ;; a little macro to make building a compiler with tracing that we can turn
-  ;; off and on easier.  no support for looping in this, but the syntax is very
-  ;; simple:
-  ;; (define-compiler my-compiler-name
-  ;;   (pass1 unparser)
-  ;;   (pass2 unparser)
-  ;;   ...
-  ;;   pass-to-generate-c)
-  ;;
+  ;;; a little macro to make building a compiler with tracing that we can turn
+  ;;; off and on easier.  no support for looping in this, but the syntax is very
+  ;;; simple:
+  ;;; (define-compiler my-compiler-name
+  ;;;   (pass1 unparser)
+  ;;;   (pass2 unparser)
+  ;;;   ...
+  ;;;   pass-to-generate-c)
+  ;;;
   (define-syntax define-compiler
     (lambda (x)
       (syntax-case x ()
@@ -2287,8 +3261,8 @@
                                  #,(loop (cdr pass*)
                                      (cdr unparser*))))))))))])))
 
-  ;; the definition of our compiler that pulls in all of our passes and runs
-  ;; them in sequence checking to see if the programmer wants them traced.
+  ;;; the definition of our compiler that pulls in all of our passes and runs
+  ;;; them in sequence checking to see if the programmer wants them traced.
   (define-compiler my-tiny-compile
     (parse-and-rename unparse-Lsrc)
     (remove-one-armed-if unparse-L1)
@@ -2313,7 +3287,7 @@
     (expose-allocation-primitives unparse-L17)
     (return-of-set! unparse-L18)
     (flatten-set! unparse-L19)
-    (push-if unparse-L20)
+    ; (push-if unparse-L20)
     (specify-constant-representation unparse-L21)
     (expand-primitives unparse-L22)
     generate-c))
