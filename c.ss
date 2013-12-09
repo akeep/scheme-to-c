@@ -22,7 +22,7 @@
 ;;;
 ;;; Primitive --> car | cdr | cons | pair? | null? | boolean? | make-vector
 ;;;            |  vector-ref | vector-set! | vector? | vector-length | box
-;;;            |  unbox | box-set! | box? | + | - | * | / | = | < | <= | >
+;;;            |  unbox | set-box! | box? | + | - | * | / | = | < | <= | >
 ;;;            |  >= | eq? 
 ;;; Var       --> symbol
 ;;; Const     --> #t | #f | '() | integer between -2^60 and 2^60 - 1
@@ -284,7 +284,7 @@
   ;;; >=                  |   2   |  pred   |    Lsrc    |    L22   |
   ;;; eq?                 |   2   |  pred   |    Lsrc    |    L22   |
   ;;; vector-set!         |   3   |  effect |    Lsrc    |    L22   |
-  ;;; box-set!            |   2   |  effect |    Lsrc    |    L22   |
+  ;;; set-box!            |   2   |  effect |    Lsrc    |    L22   |
   ;;; --------------------+-------+---------+------------+----------+
   ;;; void                |   0   |  value  |    L1      |    L22   |
   ;;; --------------------+-------+---------+------------+----------+
@@ -319,7 +319,7 @@
 
   ;;; user effect primitives
   (define user-effect-prims
-    '((vector-set! . 3) (box-set! . 2)))
+    '((vector-set! . 3) (set-box! . 2)))
 
   ;;; an association list with the user primitives
   (define user-prims
@@ -2270,7 +2270,7 @@
                 (let ([,a* ,box*] ...)
                   ,body)))))]
       [,x (if (assq x env) `(primcall unbox ,x) x)]
-      [(set! ,x ,[e]) `(primcall box-set! ,x ,e)])
+      [(set! ,x ,[e]) `(primcall set-box! ,x ,e)])
     (LambdaExpr : LambdaExpr (le env) -> LambdaExpr ()
       [(lambda (,x* ...) (assigned (,a* ...) ,body))
        (build-env x* a* env
@@ -2278,7 +2278,7 @@
            (let ([box* (make-boxes t*)] [body (Expr body env)])
              `(lambda (,x* ...)
                 (let ([,a* ,box*] ...) ,body)))))]))
-  
+
   ;;; pass: uncover-free : L10 -> L11
   ;;;
   ;;; this pass performs the first step in closure conversion, determining the
@@ -2289,7 +2289,7 @@
   ;;; this compiler we are currently skipping any of these steps, and simply
   ;;; taking this set of free variables as the set we need to capture.  (For
   ;;; one possible closure optimization technique see "Optimizing Flat
-  ;;; Closures" by Keep et. al. or Chapter 4. of "A Nanopass Compiler for
+  ;;; Closures" by Keep et. al. or Chapter 5. of "A Nanopass Compiler for
   ;;; Commercial Compiler Development" by Keep).  This is an analysis pass,
   ;;; so we are just gathering up the free variables.  This will look somewhat
   ;;; similar to the identify-assigned-variables, except we care about all
@@ -2332,7 +2332,40 @@
     (let-values ([(e free*) (Expr e)])
       (unless (null? free*) (error who "found unbound variables" free*))
       e))
-      
+
+  ;;; pass: convert-closures : L11 -> L12
+  ;;;
+  ;;; this pass begins closure conversion, using the free variable lists
+  ;;; gathered in the previous pass to begin creating our closure data
+  ;;; structures.  This pass splits letrec bindings into a 'closures' binding
+  ;;; form, which lists the bound variable, a label that will refer to the code
+  ;;; of the function (and will become the function name), and the list of free
+  ;;; variables that will be included in the final closure datastructure.  The
+  ;;; second binding form is the labels form, which binds the label for a
+  ;;; procedure to the procedures code.  We also add an explicit closure
+  ;;; pointer argument to each procedure. If we were compiling to assembly
+  ;;; code, we might avoid this and just specify a register to hold the closure
+  ;;; pointer.  We can also eliminate the need for the closure pointer if we
+  ;;; use the correct optimizations.  Finally, we add the explicit closure
+  ;;; argument to each procedure call site.
+  ;;;
+  ;;; These transformations look as follows:
+  ;;;
+  ;;; (letrec ([x* (lambda (x** ...) (free (f** ...) body*))] ...) body) =>
+  ;;; (closures ([x* l* f** ...] ...)
+  ;;;   (labels ([l* (lambda (cp* x** ...) (free (f** ...) body*))] ...) body))
+  ;;; where l* is a list of labels for each lambda expression and cp* is a 
+  ;;; list of variables representing an explicit closure argument
+  ;;;
+  ;;; (x e* ...) => (x x e* ...) ; a small optimization
+  ;;; (e e* ...) => (let ([t e]) (t t e* ...))
+  ;;; 
+  ;;; Design decision: We separate the steps of closure creation and explicit
+  ;;; allocation and setting of closure values, partially so that we can
+  ;;; implement closure optimization passes that can help reduce the number of
+  ;;; free variables, or even eliminate closures entirely, when we do not have
+  ;;; any free variables.
+  ;;;
   (define-pass convert-closures : L11 (e) -> L12 ()
     (Expr : Expr (e) -> Expr ()
       [(letrec ([,x* (lambda (,x** ...) (free (,f** ...) ,[body*]))] ...)
@@ -2346,22 +2379,91 @@
       [(,[e] ,[e*] ...)
        (let ([t (make-tmp)])
          `(let ([,t ,e]) (,t ,t ,e* ...)))]))
-              
-   (define-pass optimize-known-call : L12 (e) -> L12 ()
-     (LabelsBody : LabelsBody (lbody env) -> LabelsBody ())
-     (LambdaExpr : LambdaExpr (le env) -> LambdaExpr ())
-     (Expr : Expr (e [env '()]) -> Expr ()
-       [(closures ([,x* ,l* ,f** ...] ...) ,lbody)
-        (let ([env (fold-left
-                     (lambda (env x l) (cons (cons x l) env))
-                     env x* l*)])
-          (let ([lbody (LabelsBody lbody env)])
-            `(closures ([,x* ,l* ,f** ...] ...) ,lbody)))]
-       [(,x ,[e*] ...)
-        (cond
-          [(assq x env) => (lambda (as) `((label ,(cdr as)) ,e* ...))]
-          [else `(,x ,e* ...)])]))
 
+  ;;; pass: optimize-known-call : L12 -> L12
+  ;;;
+  ;;; a tiny "optimization" pass that recognizes when we know what procedure
+  ;;; is being called, and refers to the procedure directly, rather than
+  ;;; requiring that the procedure pointer be accessed through a dereference
+  ;;; of the closure pointer.  This allows the procedure to be called as:
+  ;;;
+  ;;; func_name_10(...)
+  ;;;
+  ;;; instead of:
+  ;;;
+  ;;; ((ptr (*)(ptr, ...))*(func_closure_10 + closure-code-offset - closure-tag)(...)
+  ;;;
+  ;;; in addition to looking simpler, it also avoids indirect calls, which
+  ;;; means both that we can avoid an extra memory reference, and the C
+  ;;; compiler has a better opportunity to optimize the call, and the processor
+  ;;; can potentially handle the code faster (in addition avoiding the extra
+  ;;; memory reference).
+  ;;;
+  ;;; Design decision: Our approach to determining when a call is known is
+  ;;; pretty simple.  When we pass a closure binding we add the binding of the
+  ;;; variable to the label to our environment, and if we encounter a call to
+  ;;; one of these variables, we replace it with a reference to the label.
+  ;;; This gives us good results, but it will not detect every known call that
+  ;;; we might be able to find if we used a more expensive analysis like
+  ;;; control-flow analysis.  For our purposes, the linear-time optimization
+  ;;; is fast and simple, but if we want a more precise analysis, and we are
+  ;;; willing to pay the additional cost (slightly less than cubic for 0CFA or
+  ;;; exponential for 1CFA or higher), than we could perform a more precise
+  ;;; analysis here. 
+  ;;;
+  (define-pass optimize-known-call : L12 (e) -> L12 ()
+    (LabelsBody : LabelsBody (lbody env) -> LabelsBody ())
+    (LambdaExpr : LambdaExpr (le env) -> LambdaExpr ())
+    (FreeBody : FreeBody (fbody env) -> FreeBody ())
+    (Expr : Expr (e [env '()]) -> Expr ()
+      [(closures ([,x* ,l* ,f** ...] ...) ,lbody)
+       (let ([env (fold-left
+                    (lambda (env x l) (cons (cons x l) env))
+                    env x* l*)])
+         (let ([lbody (LabelsBody lbody env)])
+           `(closures ([,x* ,l* ,f** ...] ...) ,lbody)))]
+      [(,x ,[e*] ...)
+       (cond
+         [(assq x env) => (lambda (as) `((label ,(cdr as)) ,e* ...))]
+         [else `(,x ,e* ...)])]))
+
+  ;;; pass: expose-closure-prims : L12 -> L13
+  ;;;
+  ;;; this pass finishes closure conversion by turning our closures form into a
+  ;;; let binding closure variables to explicit closure allocations (using the
+  ;;; added make-closure primitive) and explicit closure set!s to fill in the
+  ;;; code (with the closure-code-set!  primitive) and free variable values of
+  ;;; the closure (with the closre-data-set! primitive).  We do this as
+  ;;; separate creation and mutation steps, since we may have circular
+  ;;; datastructures, where we need to place the value of a closure allocated
+  ;;; in the let binding in a closure bound by the same let binding.  We also
+  ;;; move the labels form into plae as an expression, discard the free
+  ;;; variable list form the body of our lambda expressions, and make explicit
+  ;;; references to the closure code slot (with the closure-code primitive)
+  ;;; where closures are called, and the closure data slots (with the
+  ;;; closure-ref primitive) where a free variable is referenced.
+  ;;;
+  ;;; The transform looks as follows:
+  ;;; (closures ([x* l* f** ...] ...) lbody) =>
+  ;;; (let ([x* (primcall make-closure ---)] ...)
+  ;;;   (begin
+  ;;;     (primcall closure-code-set! x* l*) ...
+  ;;;     (primcall closure-data-set! x* 0 (car f**))
+  ;;;     (primcall closure-data-set! x* 1 (cadr f**))
+  ;;;     ...))
+  ;;;
+  ;;; (x e* ...) => ((closure-code x) e* ...)
+  ;;; x          => (closure-ref cp idx)      ; where x is a free variable, and
+  ;;;                                         ; idx is the offset of the free
+  ;;;                                         ; variable in the closure.
+  ;;; 
+  ;;;
+  ;;; Design decision: We could also combine this with the lift-lambdas pass
+  ;;; and finish lifting (our now first-order) procedures to the top-level of
+  ;;; the program.  It is reasonable to keep these separate, since their action
+  ;;; on the code is a little different, but they could also be combined
+  ;;; without much trouble.
+  ;;;
   (define-pass expose-closure-prims : L12 (e) -> L13 ()
     (Expr : Expr (e [cp #f] [free* '()]) -> Expr ()
       (definitions
@@ -2399,6 +2501,20 @@
      [(lambda (,x ,x* ...) (free (,f* ...) ,body))
       `(lambda (,x ,x* ...) ,(Expr body x f*))]))
 
+  ;;; pass: lift-lambdas : L13 -> L14
+  ;;;
+  ;;; lifts all of the labels and lambda expressions to a top-level labels
+  ;;; binding.  when we generate C code, these will become top-level C
+  ;;; functions.
+  ;;;
+  ;;; Design decisions: This pass is written using mutation, largely to shorten
+  ;;; the code that would gather up the label and lambda expression lists.
+  ;;; Another approach would be to gather these up by returning extra values
+  ;;; from each expression that has the list of labels and lambda expressions.
+  ;;; This would be simpler if the nanopass framework supported a way to flow
+  ;;; extra values through the data, but it doesn't currently support this
+  ;;; (it's on my feature todo list :).
+  ;;;
   (define-pass lift-lambdas : L13 (e) -> L14 ()
     (definitions
       (define *l* '())
@@ -2411,6 +2527,22 @@
     (let ([e (Expr e)] [l (make-tmp)])
       `(labels ([,l (lambda () ,e)] [,*l* ,*le*] ...) ,l)))
 
+  ;;; pass: remove-complex-opera* : L14 -> L15
+  ;;;
+  ;;; this pass removes nested complex operators.  strictly speaking, this is
+  ;;; not something that we need to do since C is our target, however if we
+  ;;; want to taret assembly or something like LLVM.  If we target something
+  ;;; like JavaScript, however, we might want to eliminate this.
+  ;;;
+  ;;; one reason I like this pass, is that it is a very simple pass for
+  ;;; something that is relatively complicated because the nanopadd framework
+  ;;; is really able to do a lot of work for us.
+  ;;;
+  ;;; Design decision: If we decide to remove this pass, the C code generation
+  ;;; pass will have to be a bit smarter about how it generates code, because
+  ;;; we will then have complex arguments, however, any decent C compiler
+  ;;; should be able to keep up with the tricks we'd need to play.
+  ;;;
   (define-pass remove-complex-opera* : L14 (e) -> L15 ()
     (definitions
       (with-output-language (L15 Expr)
@@ -2441,6 +2573,62 @@
          (lambda (e*)
            `(,(car e*) ,(cdr e*) ...)))]))
 
+  ;;; pass: recognize-context : L15 -> L16
+  ;;;
+  ;;; This pass seperates the Expr into Value, Effect, and Predicate cases.
+  ;;; The basic idea is to recognize where we have primitive calls that are out
+  ;;; of place for the value that they produce, the effect they perform, or the
+  ;;; branching direction they cause us to select.  This is partially necessary
+  ;;; because we are choosing our own represenation for values, which may not
+  ;;; be the same as C's representation, and because we require that each
+  ;;; procedure return a value.  The basic idea is pretty simple, the body of a
+  ;;; procedure is in Value context, so this is the context we start in.  When
+  ;;; we process an 'if' form, the test position is in predicate context.  In
+  ;;; this context we need to produce a true or false value in C (i.e. 0 for
+  ;;; true, or a non-zero integer, usually 1, for true).  If we are in Value
+  ;;; context and we encounter a 'begin' form, the expressions before the end
+  ;;; of the 'begin' form are in effect context.
+  ;;;
+  ;;; The rules are as follows:
+  ;;; In Value context:
+  ;;; (primcall effect-prim e* ...) =>
+  ;;;   (begin (primcall effect-prim e* ...) (primcall void))
+  ;;; (primcall pred-prim e* ...) =>
+  ;;;   (if (primcall pred-prim e* ...) (quote #t) (quote #f))
+  ;;;
+  ;;; In Effect context:
+  ;;;   x                             => (nop)
+  ;;;   (quote c)                     => (nop)
+  ;;;   (label l)                     => (nop)
+  ;;;   (primcall value-prim e* ...)  => (nop)
+  ;;;   (primcall effect-prim e* ...) => (nop)
+  ;;;
+  ;;; In Predicate context (remember in Scheme #f is the only false value):
+  ;;;   x                => (if (primcall = x #f) (false) (true))
+  ;;;   (quote #f)       => (false)
+  ;;;   (quote (not #f)) => (true)
+  ;;;   (primcall value-prim e* ...) =>
+  ;;;     (if (let ([t (primcall value-prim e* ...)])
+  ;;;           (= t (quote #f)))
+  ;;;         (false)
+  ;;;         (true))
+  ;;;   (primcall effect-prim e* ...) =>
+  ;;;      (begin (primcall effect-prim e* ...) (true)) ; (void) is not #f!
+  ;;;   (se se* ...) =>
+  ;;;     (if (let ([t (se se* ...)])
+  ;;;           (primcall = t (quote #f)))
+  ;;;         (false)
+  ;;;         (true))
+  ;;;   we also do a small optimization, if we see (true) or (false) in
+  ;;;   the output of an 'if' test form, we choose either the consequent or
+  ;;;   the alternative.
+  ;;; 
+  ;;; Design decision: We could swap recognize-context and
+  ;;; remove-complex-expr*, which would allow us to avoid building the 'let'
+  ;;; form when a Value prim or procedure call appears in the Predicate
+  ;;; context.  On the other hand, we would need to process three contexts of
+  ;;; Expr, and maintain the context separation.
+  ;;;
   (define-pass recognize-context : L15 (e) -> L16 ()
     (Value : Expr (e) -> Value ()
       [(primcall ,pr ,[se*] ...)
@@ -2494,6 +2682,24 @@
       [(primcall ,pr ,se* ...)
        (error who "unexpected primitive found" pr)]))
 
+  ;;; pass: expose-allocation-primitives : L16 -> L17
+  ;;;
+  ;;; this pass replaces the primitives that allocate new Scheme data
+  ;;; structures with a generic alloc form that takes the number of bytes to
+  ;;; allocate and the tag to add.  (We cheat a little on the number of bytes
+  ;;; by using the fact that our fixnum data type is going to be adjusted
+  ;;; appropriately from representing the number of words in the data structure
+  ;;; to the number of bytes in the data structure.)  This will eliminate
+  ;;; primitive calls to make-vector, make-closure, box, and cons and replace
+  ;;; it with allocs and explicit sets.  One thing to note is that in the case
+  ;;; of box and cons, we want to be sure that the arguments are evaluated
+  ;;; first, then the space is allocated, and finally the values are set in the
+  ;;; data structure. We do this because, while we can evaluate the arguments
+  ;;; in any order, however, we need to complete their evaluation before we
+  ;;; start executing the primitive.  In our little compiler, we could get away
+  ;;; with cheating, but if we added a feature like call/cc our cheats would be
+  ;;; observable.
+  ;;; 
   (define-pass expose-allocation-primitives : L16 (e) -> L17 ()
     (Value : Value (v) -> Value ()
       [(primcall ,vpr ,[se])
@@ -2527,7 +2733,7 @@
             `(let ([,t0 ,se])
                (let ([,t1 (alloc ,box-tag (quote 1))])
                  (begin
-                   (primcall box-set! ,t1 ,t0)
+                   (primcall set-box! ,t1 ,t0)
                    ,t1))))]
          [else `(primcall ,vpr ,se)])]
       [(primcall ,vpr ,[se0] ,[se1])
@@ -2542,6 +2748,29 @@
                    ,t2))))]
          [else `(primcall ,vpr ,se0 ,se1)])]))
   
+  ;;; pass: return-of-set! : L17 -> L18
+  ;;;
+  ;;; In this psss we remove the 'let' form and replace it with set!.  While
+  ;;; this set! looks like the source-level set!, it really is not the same
+  ;;; thing, since each of our variables only ever receive one value over the
+  ;;; course of running the program.  If we were compiling to assembly or LLVM,
+  ;;; these set!s would directly set the variable at its allocated position,
+  ;;; i.e. in a register or memory location.  Here we leave the job of deciding
+  ;;; where to allocate each of our single-assignemnt variables.  In this pass,
+  ;;; we also gather up all of the variables as locals, so that we can put our
+  ;;; variable declarations at the start of the C function.  (This is not
+  ;;; required in a modern C compiler, but it does make our job easier, since
+  ;;; we don't have to worry about needing to create variables in C contexts
+  ;;; where it might not be allowed.)  This latter job is what causes all of
+  ;;; the extra work, since there is not a good way to gather up the values
+  ;;; without returning from every form in each of our three contexts.
+  ;;;
+  ;;; Design decision: We could simplify this pass by putting it before the
+  ;;; recognize-context pass, but that would compilcate the recognize-context
+  ;;; pass.  With all of these types of decisions, it is largely a balancing
+  ;;; act of managing the complexity of individual passes, to try to keep the
+  ;;; compiler as simple as possible.
+  ;;;
   (define-pass return-of-set! : L17 (e) -> L18 ()
     (definitions
       (with-output-language (L18 Effect)
@@ -2610,6 +2839,26 @@
       [(lambda (,x* ...) ,[body var*])
        `(lambda (,x* ...) (locals (,var* ...) ,body))]))
   
+  ;;; pass: flatten-set! : L18 -> L19
+  ;;;
+  ;;; In the previous pass we remove the 'let' form, but we now may have set!
+  ;;; expressions on the right-hand side of a set!, such as the following:
+  ;;;
+  ;;; (set! x.0 (begin
+  ;;;             (set! y.1 5)
+  ;;;             (set! z.2 7)
+  ;;;             (primcall + y.1 z.2)))
+  ;;;
+  ;;; However, while this is legal in C, we'd like to avoid this, which will
+  ;;; help us generate a little easier to read code, and again if we were
+  ;;; targeting something like assembly, would be required.  We can transform
+  ;;; our example above into:
+  ;;;
+  ;;; (begin
+  ;;;   (set! y.1 5)
+  ;;;   (set! z.2 7)
+  ;;;   (set! x.0 (primcall + y.1 z.2)))
+  ;;;
   (define-pass flatten-set! : L18 (e) -> L19 ()
     (SimpleExpr : SimpleExpr (se) -> SimpleExpr ())
     (Effect : Effect (e) -> Effect ()
@@ -2773,7 +3022,7 @@
       #;[(begin ,[e*] ... ,[e]) (build-begin e* e)]
       [(primcall ,epr ,[se0] ,[se1])
        (case epr
-         [(box-set!) `(mset! ,se0 #f ,(- box-tag) ,se1)]
+         [(set-box!) `(mset! ,se0 #f ,(- box-tag) ,se1)]
          [($set-car!) `(mset! ,se0 #f ,(- pair-tag) ,se1)]
          [($set-cdr!) `(mset! ,se0 #f ,(- word-size pair-tag) ,se1)]
          [($vector-length-set!) `(mset! ,se0 #f ,(- vector-tag) ,se1)]
