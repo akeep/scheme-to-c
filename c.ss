@@ -249,7 +249,35 @@
           (set! count (+ count 1))
           (string->symbol
             (string-append (symbol->string name) "." (number->string c)))))))
-            
+
+  ;; strip the numberic bit back off the unique-var
+  (define base-var
+    (lambda (x)
+      (define s0
+        (lambda (rls)
+          (if (null? rls)
+              (error 'base-var "not a unique-var created variable" x)
+              (let ([c (car rls)])
+                (cond
+                  [(char-numeric? c) (s1 (cdr rls))]
+                  [else (error 'base-var
+                          "not a unique-var created variable" x)])))))
+      (define s1
+        (lambda (rls)
+          (if (null? rls)
+              (error 'base-var "not a unique-var created variable" x)
+              (let ([c (car rls)])
+                (cond
+                  [(char-numeric? c) (s1 (cdr rls))]
+                  [(char=? c #\.) (cdr rls)]
+                  [else (error 'base-var
+                          "not a unique-var created variable" x)])))))
+      (string->symbol
+        (list->string
+          (reverse 
+            (s0 (reverse (string->list (symbol->string x)))))))))
+      
+
   ;;; Convenience procedure for building temporaries in the compiler.
   (define make-tmp (lambda () (unique-var 't)))
 
@@ -732,7 +760,7 @@
          (let ([x* e*] ...) abody)
          (letrec ([x* e*] ...) abody)))
     (AssignedBody (abody)
-      (+ (assigned (a* ...) body) => body)))
+      (+ (assigned (a* ...) body))))
 
   ;;; Language 8: letrec binding is changed to only bind variables to lambdas.
   ;
@@ -1004,13 +1032,15 @@
     (Expr (e body)
       (- x
          (quote c)
+         (label l)
          (primcall pr e* ...)
          (e e* ...))
       (+ se
-         (primcall pr se* ...)
+         (primcall pr se* ...) => (pr se* ...)
          (se se* ...)))
     (SimpleExpr (se)
       (+ x
+         (label l)
          (quote c))))
   
   ;;; Language 16: separates the Expr nonterminal into the Value, Effect, and
@@ -1037,14 +1067,14 @@
       (if p0 v1 v2)
       (begin e* ... v)
       (let ([x* v*] ...) body)
-      (primcall vpr se* ...)
+      (primcall vpr se* ...) => (vpr se* ...)
       (se se* ...))
     (Effect (e)
       (nop)
       (if p0 e1 e2)
       (begin e* ... e)
       (let ([x* v*] ...) e)
-      (primcall epr se* ...)
+      (primcall epr se* ...) => (epr se* ...)
       (se se* ...))
     (Predicate (p)
       (true)
@@ -1052,7 +1082,7 @@
       (if p0 p1 p2)
       (begin e* ... p)
       (let ([x* v*] ...) p)
-      (primcall ppr se* ...)))
+      (primcall ppr se* ...) => (ppr se* ...)))
 
   ;;; Language 17: removes the allocation primitives: cons, box, make-vector,
   ;;; and make-closure and adds a generic alloc form for specifying allocation.  It
@@ -1225,7 +1255,7 @@
     (Rhs (rhs)
       (+ se
          (alloc i se)
-         (primcall vpr se* ...)
+         (primcall vpr se* ...) => (vpr se* ...)
          (se se* ...)))
     (Effect (e)
       (- (set! x v))
@@ -1719,12 +1749,25 @@
       ;;; with-output-language.
       (definitions
         ;;; build-begin - helper function to build a begin only when the body
-        ;;; contains more then one expression.
+        ;;; contains more then one expression.  (this version of the helper
+        ;;; is a little over-kill, but it makes our traces look a little 
+        ;;; cleaner.  there should be a simpler way of doing this.)
         (define build-begin
-          (lambda (body* body)
-            (if (null? body*)
-                body
-                `(begin ,body* ... ,body)))))
+          (lambda (e* e)
+            (nanopass-case (L3 Expr) e
+              [(begin ,e1* ... ,e) 
+               (build-begin (append e* e1*) e)]
+              [else
+               (if (null? e*)
+                   e
+                   (let loop ([e* e*] [re* '()])
+                     (if (null? e*)
+                         `(begin ,(reverse re*) ... ,e)
+                         (let ([e (car e*)])
+                           (nanopass-case (L3 Expr) e
+                             [(begin ,e0* ... ,e0)
+                               (loop (append e0* (cons e0 (cdr e*))) re*)]
+                             [else (loop (cdr e*) (cons (car e*) re*))])))))]))))
       [(let ([,x* ,[e*]] ...) ,[body*] ... ,[body])
        `(let ([,x* ,e*] ...) ,(build-begin body* body))]
       [(letrec ([,x* ,[e*]] ...) ,[body*] ... ,[body])
@@ -2057,10 +2100,21 @@
         ;; build a begin when we have more then one expression, otherwise just
         ;; return the one expression.
         (define build-begin
-          (lambda (body* body)
-            (if (null? body*)
-                body
-                `(begin ,body* ... ,body)))))
+          (lambda (e* e)
+            (nanopass-case (L8 Expr) e
+              [(begin ,e1* ... ,e) 
+               (build-begin (append e* e1*) e)]
+              [else
+               (if (null? e*)
+                   e
+                   (let loop ([e* e*] [re* '()])
+                     (if (null? e*)
+                         `(begin ,(reverse re*) ... ,e)
+                         (let ([e (car e*)])
+                           (nanopass-case (L8 Expr) e
+                             [(begin ,e0* ... ,e0)
+                               (loop (append e0* (cons e0 (cdr e*))) re*)]
+                             [else (loop (cdr e*) (cons (car e*) re*))])))))]))))
       [(letrec ([,x* ,[e*]] ...) (assigned (,a* ...) ,[body]))
        ;; loop through our bindings, separating them into simple, lambda, and
        ;; complex.
@@ -2182,7 +2236,7 @@
   (define-pass remove-anonymous-lambda : L8 (e) -> L9 ()
     (Expr : Expr (e) -> Expr ()
       [(lambda (,x* ...) ,[abody])
-       (let ([t (make-tmp)])
+       (let ([t (unique-var 'anon)])
          `(letrec ([,t (lambda (,x* ...) ,abody)]) ,t))]))
 
   ;;; pass: convert-assignments : L9 -> L10
@@ -2265,19 +2319,17 @@
       [(let ([,x* ,[e*]] ...) (assigned (,a* ...) ,body))
        (build-env x* a* env
          (lambda (x* t* env)
-           (let ([box* (make-boxes t*)] [body (Expr body env)])
-             `(let ([,x* ,e*] ...) 
-                (let ([,a* ,box*] ...)
-                  ,body)))))]
+           (build-let x* e*
+             (build-let a* (make-boxes t*)
+               (Expr body env)))))]
       [,x (if (assq x env) `(primcall unbox ,x) x)]
       [(set! ,x ,[e]) `(primcall set-box! ,x ,e)])
     (LambdaExpr : LambdaExpr (le env) -> LambdaExpr ()
       [(lambda (,x* ...) (assigned (,a* ...) ,body))
        (build-env x* a* env
          (lambda (x* t* env)
-           (let ([box* (make-boxes t*)] [body (Expr body env)])
-             `(lambda (,x* ...)
-                (let ([,a* ,box*] ...) ,body)))))]))
+           `(lambda (,x* ...)
+              ,(build-let a* (make-boxes t*) (Expr body env)))))]))
 
   ;;; pass: uncover-free : L10 -> L11
   ;;;
@@ -2367,10 +2419,18 @@
   ;;; any free variables.
   ;;;
   (define-pass convert-closures : L11 (e) -> L12 ()
+    (definitions
+      (define make-cp (lambda (x) (unique-var 'cp)))
+      (define make-label
+        (lambda (x)
+          (unique-var
+            (string->symbol
+              (string-append "l:"
+                (symbol->string (base-var x))))))))
     (Expr : Expr (e) -> Expr ()
       [(letrec ([,x* (lambda (,x** ...) (free (,f** ...) ,[body*]))] ...)
          ,[body])
-       (let ([l* (map unique-var x*)] [cp* (map unique-var x*)])
+       (let ([l* (map make-label x*)] [cp* (map make-cp x*)])
          `(closures ([,x* ,l* ,f** ...] ...)
             (labels ([,l* (lambda (,cp* ,x** ...)
                             (free (,f** ...) ,body*))] ...)
@@ -2487,12 +2547,14 @@
                           e*)))))
               '()
               x* l* f**))))
-      [(closures ([,x* ,l* ,f** ...] ...) ,lbody)
+      [(closures ([,x* ,l* ,f** ...] ...)
+         (labels ([,l2* ,[le*]] ...) ,[body]))
        (let ([size* (map length f**)])
          `(let ([,x* (primcall make-closure (quote ,size*))] ...)
-            (begin
-              ,(build-closure-set* x* l* f** cp free*) ...
-              ,(LabelsBody lbody))))]
+            (labels ([,l2* ,le*] ...)
+              (begin
+                ,(build-closure-set* x* l* f** cp free*) ...
+                ,body))))]
       [,x (handle-closure-ref x cp free*)]
       [((label ,l) ,[e*] ...) `((label ,l) ,e* ...)]
       [(,[e] ,[e*] ...) `((primcall closure-code ,e) ,e* ...)])
@@ -2524,7 +2586,7 @@
        (set! *l* (append l* *l*))
        (set! *le* (append le* *le*))
        body])
-    (let ([e (Expr e)] [l (make-tmp)])
+    (let ([e (Expr e)] [l (unique-var 'l:program)])
       `(labels ([,l (lambda () ,e)] [,*l* ,*le*] ...) ,l)))
 
   ;;; pass: remove-complex-opera* : L14 -> L15
@@ -2560,6 +2622,7 @@
                   (nanopass-case (L15 Expr) e
                     [,x (loop (cdr e*) t* te* (cons x re*))]
                     [(quote ,c) (loop (cdr e*) t* te* (cons e re*))]
+                    [(label ,l) (loop (cdr e*) t* te* (cons e re*))]
                     [else (let ([t (make-tmp)])
                             (loop (cdr e*) (cons t t*)
                               (cons e te*) (cons t re*)))])))))))
@@ -2784,13 +2847,25 @@
       (definitions
         (define build-begin
           (lambda (e* v)
-            (if (null? e*)
-                v
-                `(begin ,e* ... ,v)))))
+            (nanopass-case (L18 Value) v
+              [(begin ,e1* ... ,v) 
+               (build-begin (append e* e1*) v)]
+              [else
+               (if (null? e*)
+                   v
+                   (let loop ([e* e*] [re* '()])
+                     (if (null? e*)
+                         `(begin ,(reverse re*) ... ,v)
+                         (let ([e (car e*)])
+                           (nanopass-case (L18 Effect) e
+                             [(nop) (loop (cdr e*) re*)]
+                             [(begin ,e0* ... ,e0)
+                               (loop (append e0* (cons e0 (cdr e*))) re*)]
+                             [else (loop (cdr e*) (cons (car e*) re*))])))))]))))
       [(if ,[p0 var0*] ,[v1 var1*] ,[v2 var2*])
        (values `(if ,p0 ,v1 ,v2) (append var0* var1* var2*))]
       [(begin ,[e* var**] ... ,[v var*])
-       (values `(begin ,e* ... ,v) (apply append var* var**))]
+       (values (build-begin e* v) (apply append var* var**))]
       [(primcall ,vpr ,[se* var**] ...)
        (values `(primcall ,vpr ,se* ...) (apply append var**))]
       [(,[se var*] ,[se* var**] ...)
@@ -2803,13 +2878,25 @@
       (definitions
         (define build-begin
           (lambda (e* e)
-            (if (null? e*)
-                e
-                `(begin ,e* ... ,e)))))
+            (nanopass-case (L18 Effect) e
+              [(begin ,e1* ... ,e) 
+               (build-begin (append e* e1*) e)]
+              [else
+               (if (null? e*)
+                   e
+                   (let loop ([e* e*] [re* '()])
+                     (if (null? e*)
+                         `(begin ,(reverse re*) ... ,e)
+                         (let ([e (car e*)])
+                           (nanopass-case (L18 Effect) e
+                             [(nop) (loop (cdr e*) re*)]
+                             [(begin ,e0* ... ,e0)
+                               (loop (append e0* (cons e0 (cdr e*))) re*)]
+                             [else (loop (cdr e*) (cons (car e*) re*))])))))]))))
       [(if ,[p0 var0*] ,[e1 var1*] ,[e2 var2*])
        (values `(if ,p0 ,e1 ,e2) (append var0* var1* var2*))]
       [(begin ,[e* var**] ... ,[e var*])
-       (values `(begin ,e* ... ,e) (apply append var* var**))]
+       (values (build-begin e* e) (apply append var* var**))]
       [(primcall ,epr ,[se* var**] ...)
        (values `(primcall ,epr ,se* ...) (apply append var**))]
       [(,[se var*] ,[se* var**] ...)
@@ -2822,13 +2909,25 @@
       (definitions
         (define build-begin
           (lambda (e* p)
-            (if (null? e*)
-                p
-                `(begin ,e* ... ,p)))))
+            (nanopass-case (L18 Predicate) p
+              [(begin ,e1* ... ,p) 
+               (build-begin (append e* e1*) p)]
+              [else
+               (if (null? e*)
+                   p
+                   (let loop ([e* e*] [re* '()])
+                     (if (null? e*)
+                         `(begin ,(reverse re*) ... ,e)
+                         (let ([e (car e*)])
+                           (nanopass-case (L18 Effect) e
+                             [(nop) (loop (cdr e*) re*)]
+                             [(begin ,e0* ... ,e0)
+                               (loop (append e0* (cons e0 (cdr e*))) re*)]
+                             [else (loop (cdr e*) (cons (car e*) re*))])))))]))))
       [(if ,[p0 var0*] ,[p1 var1*] ,[p2 var2*])
        (values `(if ,p0 ,p1 ,p2) (append var0* var1* var2*))]
       [(begin ,[e* var**] ... ,[p var*])
-       (values `(begin ,e* ... ,p) (apply append var* var**))]
+       (values (build-begin e* p) (apply append var* var**))]
       [(primcall ,ppr ,[se* var**] ...)
        (values `(primcall ,ppr ,se* ...) (apply append var**))]
       [(let ([,x* ,[v* var**]] ...) ,[p var*])
@@ -2955,7 +3054,7 @@
   ;;; the representation to LLVM or asm.js.
   ;;;;
   (define-pass expand-primitives : L21 (e) -> L22 ()
-    #;(Value : Value (v) -> Value ()
+    (Value : Value (v) -> Value ()
       (definitions
         (define build-begin
           (lambda (e* v)
@@ -2963,15 +3062,17 @@
               [(begin ,e1* ... ,v) 
                (build-begin (append e* e1*) v)]
               [else
-               (let loop ([e* e*] [re* '()])
-                 (if (null? e*)
-                     `(begin ,(reverse re*) ... ,v)
-                     (let ([e (car e*)])
-                       (nanopass-case (L22 Effect) e
-                         [(nop) (loop (cdr e*) re*)]
-                         [(begin ,e0* ... ,e0)
-                          (loop (append e0* (cons e0 (cdr e*))) re*)]
-                       [else (loop (cdr e*) (cons (car e*) re*))]))))]))))
+               (if (null? e*)
+                   v
+                   (let loop ([e* e*] [re* '()])
+                     (if (null? e*)
+                         `(begin ,(reverse re*) ... ,v)
+                         (let ([e (car e*)])
+                           (nanopass-case (L22 Effect) e
+                             [(nop) (loop (cdr e*) re*)]
+                             [(begin ,e0* ... ,e0)
+                               (loop (append e0* (cons e0 (cdr e*))) re*)]
+                             [else (loop (cdr e*) (cons (car e*) re*))])))))]))))
       [(begin ,[e*] ... ,[v]) (build-begin e* v)])
     (Rhs : Rhs (rhs) -> Rhs ()
       [(primcall ,vpr)
@@ -3003,23 +3104,25 @@
       [(primcall ,vpr ,se* ...)
        (error who "unexpected value primitive" vpr)])
     (Effect : Effect (e) -> Effect ()
-      #;(definitions
+      (definitions
         (define build-begin
           (lambda (e* e)
             (nanopass-case (L22 Effect) e
               [(begin ,e1* ... ,e) 
                (build-begin (append e* e1*) e)]
               [else
-               (let loop ([e* e*] [re* '()])
-                 (if (null? e*)
-                     `(begin ,(reverse re*) ... ,e)
-                     (let ([e (car e*)])
-                       (nanopass-case (L22 Effect) e
-                         [(nop) (loop (cdr e*) re*)]
-                         [(begin ,e0* ... ,e0)
-                          (loop (append e0* (cons e0 (cdr e*))) re*)]
-                       [else (loop (cdr e*) (cons (car e*) re*))]))))]))))
-      #;[(begin ,[e*] ... ,[e]) (build-begin e* e)]
+               (if (null? e*)
+                   e
+                   (let loop ([e* e*] [re* '()])
+                     (if (null? e*)
+                         `(begin ,(reverse re*) ... ,e)
+                         (let ([e (car e*)])
+                           (nanopass-case (L22 Effect) e
+                             [(nop) (loop (cdr e*) re*)]
+                             [(begin ,e0* ... ,e0)
+                               (loop (append e0* (cons e0 (cdr e*))) re*)]
+                             [else (loop (cdr e*) (cons (car e*) re*))])))))]))))
+      [(begin ,[e*] ... ,[e]) (build-begin e* e)]
       [(primcall ,epr ,[se0] ,[se1])
        (case epr
          [(set-box!) `(mset! ,se0 #f ,(- box-tag) ,se1)]
@@ -3037,23 +3140,25 @@
       [(primcall ,epr ,se* ...)
        (error who "unexpected effect primitive" epr)])
     (Predicate : Predicate (p) -> Predicate ()
-      #;(definitions
+      (definitions
         (define build-begin
           (lambda (e* p)
             (nanopass-case (L22 Predicate) p
               [(begin ,e1* ... ,p) 
                (build-begin (append e* e1*) p)]
               [else
-               (let loop ([e* e*] [re* '()])
-                 (if (null? e*)
-                     `(begin ,(reverse re*) ... ,p)
-                     (let ([e (car e*)])
-                       (nanopass-case (L22 Effect) e
-                         [(nop) (loop (cdr e*) re*)]
-                         [(begin ,e0* ... ,e0)
-                          (loop (append e0* (cons e0 (cdr e*))) re*)]
-                       [else (loop (cdr e*) (cons (car e*) re*))]))))]))))
-      #;[(begin ,[e*] ... ,[p]) (build-begin e* p)]
+               (if (null? e*)
+                   p
+                   (let loop ([e* e*] [re* '()])
+                     (if (null? e*)
+                         `(begin ,(reverse re*) ... ,p)
+                         (let ([e (car e*)])
+                           (nanopass-case (L22 Effect) e
+                             [(nop) (loop (cdr e*) re*)]
+                             [(begin ,e0* ... ,e0)
+                               (loop (append e0* (cons e0 (cdr e*))) re*)]
+                             [else (loop (cdr e*) (cons (car e*) re*))])))))]))))
+      [(begin ,[e*] ... ,[p]) (build-begin e* p)]
       [(primcall ,ppr ,[se])
        (case ppr
          [(pair?) `(= (logand ,se ,pair-mask) ,pair-tag)]
