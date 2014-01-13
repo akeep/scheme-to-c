@@ -1675,7 +1675,7 @@
   ;;; to understand how the nanopass framework can be used.
   ;;;
   (define-pass remove-one-armed-if : Lsrc (e) -> L1 ()
-    (Expr : Expr (e) -> Expr ()
+    (trace Expr : Expr (e) -> Expr ()
       [(if ,[e0] ,[e1]) `(if ,e0 ,e1 (void))]))
   
   ;;; pass: remove-and-or-not : L1 -> L2
@@ -2078,7 +2078,7 @@
               [,x (not (or (memq x bound*) (memq x assigned*)))]
               [(primcall ,pr ,e* ...)
                 (and (effect-free-prim? pr) (for-all f e*))]
-              [(begin ,e* ... ,e) (and (for-all f e*) e)]
+              [(begin ,e* ... ,e) (and (for-all f e*) (f e))]
               [(if ,e0 ,e1 ,e2) (and (f e0) (f e1) (f e2))]
               [else #f])))))
     (Expr : Expr (e) -> Expr ()
@@ -2560,8 +2560,8 @@
       [(,[e] ,[e*] ...) `((primcall closure-code ,e) ,e* ...)])
    (LabelsBody : LabelsBody (lbody) -> Expr ())
    (LambdaExpr : LambdaExpr (le) -> LambdaExpr ()
-     [(lambda (,x ,x* ...) (free (,f* ...) ,body))
-      `(lambda (,x ,x* ...) ,(Expr body x f*))]))
+     [(lambda (,x ,x* ...) (free (,f* ...) ,[body x f* -> body]))
+      `(lambda (,x ,x* ...) ,body)]))
 
   ;;; pass: lift-lambdas : L13 -> L14
   ;;;
@@ -2917,7 +2917,7 @@
                    p
                    (let loop ([e* e*] [re* '()])
                      (if (null? e*)
-                         `(begin ,(reverse re*) ... ,e)
+                         `(begin ,(reverse re*) ... ,p)
                          (let ([e (car e*)])
                            (nanopass-case (L18 Effect) e
                              [(nop) (loop (cdr e*) re*)]
@@ -2961,8 +2961,8 @@
   (define-pass flatten-set! : L18 (e) -> L19 ()
     (SimpleExpr : SimpleExpr (se) -> SimpleExpr ())
     (Effect : Effect (e) -> Effect ()
-      [(set! ,x ,v) (Value v x)])
-    (Value : Value (v x) -> Effect ()
+      [(set! ,x ,v) (flatten v x)])
+    (flatten : Value (v x) -> Effect ()
       [,se `(set! ,x ,(SimpleExpr se))]
       [(primcall ,vpr ,[se*] ...) `(set! ,x (primcall ,vpr ,se* ...))]
       [(alloc ,i ,[se]) `(set! ,x (alloc ,i ,se))]
@@ -3192,12 +3192,18 @@
   ;;;
   (define-pass generate-c : L22 (e) -> * ()
     (definitions
+      (define string-join
+        (lambda (str* jstr)
+          (cond
+            [(null? str*) ""]
+            [(null? (cdr str*)) (car str*)]
+            [else (string-append (car str*) jstr (string-join (cdr str*) jstr))])))
       ;;; symbol->c-id - converts any Scheme symbol into a valid C identifier.
       (define symbol->c-id
         (lambda (sym)
           (let ([ls (string->list (symbol->string sym))])
             (if (null? ls)
-                ""
+                "_"
                 (let ([fst (car ls)])
                   (list->string
                     (cons
@@ -3210,28 +3216,50 @@
                         (cdr ls)))))))))
       ;;; emit-function-header - generates a function header to be used in the
       ;;; declaration of a function or the definition of a function.
-      (define emit-function-header
+      (define format-function-header
         (lambda (l x*)
-          (printf "ptr ~a(" l)
-          (unless (null? x*)
-            (let loop ([x (car x*)] [x* (cdr x*)])
-              (if (null? x*)
-                  (printf "ptr ~a" (symbol->c-id x))
-                  (begin
-                    (printf "ptr ~a, " (symbol->c-id x))
-                    (loop (car x*) (cdr x*))))))
-
-          (printf ")"))))
+          (format "ptr ~a(~a)" l
+            (string-join
+              (map
+                (lambda (x)
+                  (format "ptr ~a" (symbol->c-id x)))
+                x*)
+              ", "))))
+      (define format-label-call
+        (lambda (l se*)
+          (format "  ~a(~a)" (symbol->c-id l)
+            (string-join
+              (map (lambda (se)
+                     (format "(ptr)~a" (format-simple-expr se)))
+                se*)
+              ", "))))
+      (define format-general-call
+        (lambda (se se*)
+          (format "((ptr (*)(~a))~a)(~a)"
+            (string-join (make-list (length se*) "ptr") ", ")
+            (format-simple-expr se)
+            (string-join
+              (map (lambda (se)
+                     (format "(ptr)~a" (format-simple-expr se)))
+                se*)
+              ", "))))
+      (define format-binop
+        (lambda (op se0 se1)
+          (format "((long)~a ~a (long)~a)"
+            (format-simple-expr se0)
+            op
+            (format-simple-expr se1))))
+      (define format-set!
+        (lambda (x rhs)
+          (format "~a = (ptr)~a" (symbol->c-id x) (format-rhs rhs)))))
     ;; transformer to print our function declarations
     (emit-function-decl : LambdaExpr (le l) -> * ()
       [(lambda (,x* ...) ,lbody)
-       (emit-function-header l x*)
-       (printf ";~%")])
+       (printf "~a;~%" (format-function-header l x*))])
     ;; transformer to print our function definitions
     (emit-function-def : LambdaExpr (le l) -> * ()
       [(lambda (,x* ...) ,lbody)
-       (emit-function-header l x*)
-       (printf " {~%")
+       (printf "~a {~%" (format-function-header l x*))
        (emit-function-body lbody)
        (printf "}~%~%")])
     ;; transformer to emit the body of a function
@@ -3250,8 +3278,7 @@
       [(begin ,e* ... ,v)
        (for-each emit-effect e*)
        (emit-value v locals*)]
-      [,rhs (let ([rhs (format-rhs rhs)])
-              (printf "  return (ptr)~a;\n" rhs))])
+      [,rhs (printf "  return (ptr)~a;\n" (format-rhs rhs))])
     ;; transformer to format Predicate expressions into strings
     (format-predicate : Predicate (p) -> * (str)
       [(if ,p0 ,p1 ,p2)
@@ -3259,26 +3286,16 @@
          (format-predicate p0)
          (format-predicate p1)
          (format-predicate p2))]
-      [(<= ,se0 ,se1)
-       (format "((long)~a <= (long)~a)"
-         (format-simple-expr se0)
-         (format-simple-expr se1))]
-      [(< ,se0 ,se1)
-       (format "((long)~a < (long)~a)"
-         (format-simple-expr se0)
-         (format-simple-expr se1))]
-      [(= ,se0 ,se1)
-       (format "((long)~a == (long)~a)"
-         (format-simple-expr se0)
-         (format-simple-expr se1))]
+      [(<= ,se0 ,se1) (format-binop "<=" se0 se1)]
+      [(< ,se0 ,se1) (format-binop "<" se0 se1)]
+      [(= ,se0 ,se1) (format-binop "==" se0 se1)]
       [(true) "1"]
       [(false) "0"]
       [(begin ,e* ... ,p)
-       (let loop ([e* e*] [str ""])
-         (if (null? e*)
-             (string-append str (format-predicate p))
-             (loop (cdr e*)
-               (string-append str (format-effect (car e*)) ", "))))])
+       (string-join
+         (fold-right (lambda (e s*) (cons (format-effect e) s*))
+           (list (format-predicate p)) e*)
+         ", ")])
     ;; transformer to format effects in predicate context into strings
     (format-effect : Effect (e) -> * (str)
       [(if ,p0 ,e1 ,e2)
@@ -3286,42 +3303,15 @@
          (format-predicate p0)
          (format-effect e1)
          (format-effect e2))]
-      [((label ,l) ,se* ...)
-       (format "~a(~a)" (symbol->c-id l)
-         (let f ([se* se*])
-           (if (null? se*)
-               ""
-               (let ([se (car se*)] [se* (cdr se*)])
-                 (format "~a~a~a"
-                   (format-simple-expr se)
-                   (if (null? se*) "" ", ")
-                   (f se*))))))]
-      [(,se ,se* ...)
-       (format "((ptr (*)(~a))~a)(~a)"
-         (let f ([i (length se*)])
-           (cond
-             [(fxzero? i) ""]
-             [(fx=? i 1) "ptr"]
-             [else (format "ptr, ~a" (f (fx- i 1)))]))
-         (format-simple-expr se)
-         (let f ([se* se*])
-           (if (null? se*)
-               ""
-               (let ([se (car se*)] [se* (cdr se*)])
-                 (format "~a~a~a"
-                   (format-simple-expr se)
-                   (if (null? se*) "" ", ")
-                   (f se*))))))]
-      [(set! ,x ,rhs) (format "~a = (ptr)~a" (symbol->c-id x) (format-rhs rhs))]
+      [((label ,l) ,se* ...) (format-label-call l se*)]
+      [(,se ,se* ...) (format-general-call se se*)]
+      [(set! ,x ,rhs) (format-set! x rhs)]
       [(nop) "0"]
       [(begin ,e* ... ,e)
-       (let f ([e* e*])
-         (if (null? e*)
-             (format-effect e)
-             (string-append
-               (format-effect (car e*))
-               ", "
-               (f (cdr e*)))))]
+       (string-join
+         (fold-right (lambda (e s*) (cons (format-effect e) s*))
+           (list (format-effect e)) e*)
+         ", ")]
       [(mset! ,se0 ,se1? ,i ,se2)
        (if se1?
            (format "((*((ptr*)((long)~a + (long)~a + ~d))) = (ptr)~a)"
@@ -3334,34 +3324,13 @@
       [,x (symbol->c-id x)]
       [,i (number->string i)]
       [(label ,l) (format "(*~a)" (symbol->c-id l))]
-      [(logand ,se0 ,se1)
-       (format "((long)~a & (long)~a)"
-         (format-simple-expr se0)
-         (format-simple-expr se1))]
-      [(shift-right ,se0 ,se1)
-       (format "((long)~a >> (long)~a)"
-         (format-simple-expr se0)
-         (format-simple-expr se1))]
-      [(shift-left ,se0 ,se1)
-       (format "((long)~a << (long)~a)"
-         (format-simple-expr se0)
-         (format-simple-expr se1))]
-      [(divide ,se0 ,se1)
-       (format "((long)~a / (long)~a)"
-         (format-simple-expr se0)
-         (format-simple-expr se1))]
-      [(multiply ,se0 ,se1)
-       (format "((long)~a * (long)~a)"
-         (format-simple-expr se0)
-         (format-simple-expr se1))]
-      [(subtract ,se0 ,se1)
-       (format "((long)~a - (long)~a)"
-         (format-simple-expr se0)
-         (format-simple-expr se1))]
-      [(add ,se0 ,se1)
-       (format "((long)~a + (long)~a)"
-         (format-simple-expr se0)
-         (format-simple-expr se1))]
+      [(logand ,se0 ,se1) (format-binop "&" se0 se1)]
+      [(shift-right ,se0 ,se1) (format-binop ">>" se0 se1)]
+      [(shift-left ,se0 ,se1) (format-binop "<<" se0 se1)]
+      [(divide ,se0 ,se1) (format-binop "/" se0 se1)]
+      [(multiply ,se0 ,se1) (format-binop "*" se0 se1)]
+      [(subtract ,se0 ,se1) (format-binop "-" se0 se1)]
+      [(add ,se0 ,se1) (format-binop "+" se0 se1)]
       [(mref ,se0 ,se1? ,i) 
        (if se1?
            (format "(*((ptr)((long)~a + (long)~a + ~d)))"
@@ -3376,35 +3345,9 @@
        (printf "  } else {~%")
        (emit-effect e2)
        (printf "  }~%")]
-      [((label ,l) ,se* ...)
-       (printf "  ~a(" (symbol->c-id l))
-       (unless (null? se*)
-         (let loop ([se (car se*)] [se* (cdr se*)])
-           (if (null? se*)
-               (printf "(ptr)~a" (format-simple-expr se))
-               (begin
-                 (printf "(ptr)~a, " (format-simple-expr se))
-                 (loop (car se*) (cdr se*))))))
-       (printf ");\n")]
-      [(,se ,se* ...)
-       (printf "  ((ptr (*)(~a))~a)("
-         (let loop ([i (length se*)])
-           (cond
-             [(fxzero? i) ""]
-             [(fx=? i 1) "ptr"]
-             [else (format "ptr, ~a" (loop (fx- i 1)))]))
-         (format-simple-expr se))
-       (unless (null? se*)
-         (let loop ([se (car se*)] [se* (cdr se*)])
-           (if (null? se*)
-               (printf "(ptr)~a" (format-simple-expr se))
-               (begin
-                 (printf "(ptr)~a, " (format-simple-expr se))
-                 (loop (car se*) (cdr se*))))))
-       (printf ");\n")]
-      [(set! ,x ,rhs)
-       (printf "  ~a = (ptr)" (symbol->c-id x))
-       (printf "~a;\n" (format-rhs rhs))]
+      [((label ,l) ,se* ...) (printf "  ~a;\n" (format-label-call l se*))]
+      [(,se ,se* ...) (printf "  ~a;\n" (format-general-call se se*))]
+      [(set! ,x ,rhs) (printf "  ~a;\n" (format-set! x rhs))]
       [(nop) (if #f #f)]
       [(begin ,e* ... ,e)
        (for-each emit-effect e*)
@@ -3418,29 +3361,8 @@
              (format-simple-expr se0) i (format-simple-expr se2)))])
     ;; formats the right-hand side of a set! into a C expression
     (format-rhs : Rhs (rhs) -> * (str)
-      [((label ,l) ,se* ...)
-       (format "  ~a(~a)" (symbol->c-id l)
-         (if (null? se*)
-             ""
-             (let loop ([se (car se*)] [se* (cdr se*)])
-               (if (null? se*)
-                   (format "(ptr)~a" (format-simple-expr se))
-                   (format "(ptr)~a, ~a" (format-simple-expr se)
-                     (loop (car se*) (cdr se*)))))))]
-      [(,se ,se* ...)
-       (format "  ((ptr (*)(~a))~a)(~a)"
-         (let loop ([i (length se*)])
-           (cond
-             [(zero? i) ""]
-             [(fx=? i 1) "ptr"]
-             [else (format "ptr, ~a" (loop (fx- i 1)))]))
-         (format-simple-expr se)
-         (let loop ([se (car se*)] [se* (cdr se*)])
-           (if (null? se*)
-               (format "(ptr)~a" (format-simple-expr se))
-               (format "(ptr)~a, ~a"
-                 (format-simple-expr se)
-                 (loop (car se*) (cdr se*))))))]
+      [((label ,l) ,se* ...) (format-label-call l se*)]
+      [(,se ,se* ...) (format-general-call se se*)]
       [(alloc ,i ,se)
        (if (use-boehm?)
            (format "(ptr)((long)GC_MALLOC(~a) + ~dl)"
@@ -3454,40 +3376,46 @@
        (let ([l (symbol->c-id l)] [l* (map symbol->c-id l*)])
          (define-syntax emit-include
            (syntax-rules ()
-             [(_ name) (printf "~s\n" 'name)]))
+             [(_ name) (printf "#include <~s>\n" 'name)]))
          (define-syntax emit-predicate
            (syntax-rules ()
              [(_ PRED_P mask tag)
               (emit-c-macro PRED_P (x) "(((long)x & ~d) == ~d)" mask tag)]))
+         (define-syntax emit-eq-predicate
+           (syntax-rules ()
+             [(_ PRED_P rep)
+              (emit-c-macro PRED_P (x) "((long)x == ~d)" rep)]))
          (define-syntax emit-c-macro
            (lambda (x)
              (syntax-case x()
                [(_ NAME (x* ...) fmt args ...)
-                #'(printf "#define NAME(xlist) ~a" (format fmt args ...))])))
+                #'(printf "#define ~s(~a) ~a\n" 'NAME
+                    (string-join (map symbol->string '(x* ...)) ", ")
+                    (format fmt args ...))])))
          ;; the following printfs output the tiny C runtime we are using
          ;; to wrap the result of our compiled Scheme program.
-         (printf "#include <stdio.h>\n\
-                  ~a\n\
-                  typedef long* ptr;\n\
-                 "
-                 (if (use-boehm?) "#include <gc.h>" "#include <stdlib.h>"))
-         (printf "#define FIXNUM_P(x) (((long)x & ~d) == ~d)\n" fixnum-mask fixnum-tag)
-         (printf "#define FIX(x) ((long)x << ~d)\n" fixnum-shift)
-         (printf "#define UNFIX(x) ((long)x >> ~d)\n" fixnum-shift)
-         (printf "#define PAIR_P(x) (((long)x & ~d) == ~d)\n" pair-mask pair-tag)
-         (printf "#define BOX_P(x) (((long)x & ~d) == ~d)\n" box-mask box-tag)
-         (printf "#define UNBOX(x) ((ptr)*((ptr)((long)x - ~d)))\n" box-tag)
-         (printf "#define VECTOR_P(x) (((long)x & ~d) == ~d)\n" vector-mask vector-tag)
-         (printf "#define VECTOR_LENGTH_S(x) ((long)*((ptr)((long)x - ~d)))\n" vector-tag)
-         (printf "#define VECTOR_LENGTH_C(x) UNFIX(((long)*((ptr)((long)x - ~d))))\n" vector-tag)
-         (printf "#define VECTOR_REF(x,i) ((ptr)*((ptr)((long)x + ((i + 1) * ~d) - ~d)))\n" word-size vector-tag)
-         (printf "#define TRUE_P(x) ((long)x == ~d)\n" true-rep)
-         (printf "#define FALSE_P(x) ((long)x == ~d)\n" false-rep)
-         (printf "#define NULL_P(x) ((long)x == ~d)\n" null-rep)
-         (printf "#define VOID_P(x) ((long)x == ~d)\n" void-rep)
-         (printf "#define CAR(x) ((ptr)*((ptr)((long)x - ~d)))\n" pair-tag)
-         (printf "#define CDR(x) ((ptr)*((ptr)((long)x + ~d - ~d)))\n" word-size pair-tag)
-         (printf "#define PROCEDURE_P(x) (((long)x & ~d) == ~d)\n" closure-mask closure-tag)
+         (emit-include stdio.h)
+         (if (use-boehm?)
+             (emit-include gc.h)
+             (emit-include stdlib.h))
+         (emit-predicate FIXNUM_P fixnum-mask fixnum-tag)
+         (emit-predicate PAIR_P pair-mask pair-tag)
+         (emit-predicate BOX_P box-mask box-tag)
+         (emit-predicate VECTOR_P vector-mask vector-tag)
+         (emit-predicate PROCEDURE_P closure-mask closure-tag)
+         (emit-eq-predicate TRUE_P true-rep)
+         (emit-eq-predicate FALSE_P false-rep)
+         (emit-eq-predicate NULL_P null-rep)
+         (emit-eq-predicate VOID_P void-rep)
+         (printf "typedef long* ptr;\n")
+         (emit-c-macro FIX (x) "((long)x << ~d)" fixnum-shift)
+         (emit-c-macro UNFIX (x) "((long)x >> ~d)" fixnum-shift)
+         (emit-c-macro UNBOX (x) "((ptr)*((ptr)((long)x - ~d)))" box-tag)
+         (emit-c-macro VECTOR_LENGTH_S (x) "((ptr)*((ptr)((long)x - ~d)))" vector-tag)
+         (emit-c-macro VECTOR_LENGTH_C (x) "UNFIX(VECTOR_LENGTH_S(x))")
+         (emit-c-macro VECTOR_REF (x i) "((ptr)*((ptr)((long)x - ~d + ((i+1) * ~d))))" vector-tag word-size)
+         (emit-c-macro CAR (x) "((ptr)*((ptr)((long)x - ~d)))" pair-tag)
+         (emit-c-macro CDR (x) "((ptr)*((ptr)((long)x - ~d + ~d)))" pair-tag word-size)
          (printf "void print_scheme_value(ptr x) {\n")
          (printf "  long i, veclen;\n")
          (printf "  ptr p;\n")
