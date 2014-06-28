@@ -1675,7 +1675,7 @@
   ;;; to understand how the nanopass framework can be used.
   ;;;
   (define-pass remove-one-armed-if : Lsrc (e) -> L1 ()
-    (trace Expr : Expr (e) -> Expr ()
+    (Expr : Expr (e) -> Expr ()
       [(if ,[e0] ,[e1]) `(if ,e0 ,e1 (void))]))
   
   ;;; pass: remove-and-or-not : L1 -> L2
