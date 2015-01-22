@@ -1591,7 +1591,7 @@
             (cons 'and (lambda (env . e*) `(and ,(Expr* e* env) ...)))
             (cons 'not (lambda (env e) `(not ,(Expr e env))))
             (cons 'begin (lambda (env . e*)
-                           (process-body env e*
+                           (process-body 'begin env e*
                              (lambda (e* e)
                                `(begin ,e* ... ,e)))))
             (cons 'lambda (lambda (env fmls . body*)
@@ -3532,7 +3532,7 @@
                                    (if (use-boehm?) "-lgc" "")))
                                (when (file-exists? "t.out")
                                  (delete-file "t.out"))
-                               (system "t > t.out")
+                               (system "./t > t.out")
                                (call-with-input-file "t.out" read))
                            (with-syntax ([pass (car pass*)]
                                          [unparser (car unparser*)])
