@@ -10,11 +10,18 @@ There is still much to be done.  More tests are needed and a few passes are
 still not documented, and I still have not tested the boehm collector, though
 I hope to do so soon.
 
+Bartlett's Scheme-&gt;C
+=====================
+This should not be confused with Bartlett's Fabled Scheme-&gt;C compiler,
+available at http://scheme2c.alioth.debian.org/, with a clone of the source
+repository at https://github.com/barak/scheme2c/.  (Nod to @barak for pointing
+this out!)
+
 Required Libraries
 ===================
 There are two required git repositories to run this compiler.  This repository
 (of course), and the nanopass framework repository at
-github.com/akeep/nanopass-framework.
+https://github.com/nanopass/nanopass-framework-scheme/.
 
 You will also need one of the supported host compilers listed in the next
 section.
@@ -28,20 +35,19 @@ Framework in order to operate.
 
 Getting Chez Scheme
 --------------------
-A free version of the Chez Scheme interpreter, Petite Chez Scheme, is
-available for download on http://www.scheme.com/.  Generally, it is easiest
-to install the non-threaded version that is available for your machine, and
-use the 64-bit version, if it is supported on your platform.
+Chez Scheme is available at http://github.com/cisco/ChezScheme/ with
+documentaton at http://cisco.github.io/ChezScheme/.
 
 Running on Chez Scheme
 -----------------------
-In the `scheme-to-c` directory start `petite` using the `--libdirs` command
-line switch to tell `petite` where to find the `nanopass-framework` directory:
+In the `scheme-to-c` directory start `scheme` using the `--libdirs` command
+line switch to tell `scheme` where to find the `nanopass-framework-scheme`
+directory:
 
 ```
-$ petite --libdirs .:<path to nanopass-framework>
-Petite Chez Scheme Version 8.4
-Copyright (c) 1985-2011 Cadence Research Systems
+$ scheme --libdirs .:<path to nanopass-framework-scheme>
+Chez Scheme Version 9.4.1
+Copyright 1984-2016 Cisco Systems, Inc.
 
 > (import (c))
 > (my-tiny-compile '(+ 4 5))
@@ -51,9 +57,9 @@ Copyright (c) 1985-2011 Cadence Research Systems
 You can run the tests as:
 
 ```
-$ petite --libdirs .:<path to nanopass-framework>
-Petite Chez Scheme Version 8.4
-Copyright (c) 1985-2011 Cadence Research Systems
+$ scheme --libdirs .:<path to nanopass-framework-scheme>
+Chez Scheme Version 9.4.1
+Copyright 1984-2016 Cisco Systems, Inc.
 
 > (import (tests))
 > (run-tests)
@@ -79,17 +85,17 @@ the path to run `ikarus`.
 
 Running on Ikarus
 ------------------
-When running on `ikarus` you will also need to add the `nanopass-framework`
-directory to the path in order to run the new compiler.  This can be done with
-an environment variable, but I generally find it easier to do this on the
-`ikarus` REPL as follows:
+When running on `ikarus` you will also need to add the
+`nanopass-framework-scheme` directory to the path in order to run the new
+compiler.  This can be done with an environment variable, but I generally find
+it easier to do this on the `ikarus` REPL as follows:
 
 ```
 $ ikarus 
 Ikarus Scheme version 0.0.4-rc1+, 64-bit (revision 1870, build 2013-10-16)
 Copyright (c) 2006-2009 Abdulaziz Ghuloum
 
-> (library-path (cons "../nanopass-framework" (library-path)))
+> (library-path (cons "../nanopass-framework-scheme" (library-path)))
 > (import (c))
 > (my-tiny-compiler '(+ 4 5))
 9
@@ -102,7 +108,7 @@ $ ikarus
 Ikarus Scheme version 0.0.4-rc1+, 64-bit (revision 1870, build 2013-10-16)
 Copyright (c) 2006-2009 Abdulaziz Ghuloum
 
-> (library-path (cons "../nanopass-framework" (library-path)))
+> (library-path (cons "../nanopass-framework-scheme" (library-path)))
 > (import (tests))
 > (run-tests)
 running test 0:
@@ -127,15 +133,17 @@ shell out to run `gcc`.
 Running on Vicare
 ------------------
 Similar to Ikarus and Chez Scheme, Vicare also needs to be informed of where
-to find the `nanopass-framework` directory.  Vicare also needs to be told to
-look for additional Scheme file extensions, since I am using `.ss` instead of
-the more recently introduced `.sls` for R6RS Scheme libraries.  Here we can
-use the `--more-file-extensions` and two calls to the `--search-path` command
-line flag, one to search in the `nanopass-framework` directory and one in the
-current directory, `.`, which is otherwise not included.
+to find the `nanopass-framework-scheme` directory.  Vicare also needs to be
+told to look for additional Scheme file extensions, since I am using `.ss`
+instead of the more recently introduced `.sls` for R6RS Scheme libraries.  Here
+we can use the `--more-file-extensions` and two calls to the `--search-path`
+command line flag, one to search in the `nanopass-framework-scheme` directory
+and one in the current directory, `.`, which is otherwise not included.
 
 ```
-$ vicare --more-file-extensions --search-path ../nanopass-framework --search-path .
+$ vicare --more-file-extensions \
+--search-path ../nanopass-framework-scheme \
+--search-path .
 Vicare Scheme version 0.3d1, 64-bit
 Revision no-branch/no-commit
 Build 2013-10-15
@@ -151,7 +159,9 @@ vicare> (my-tiny-compile '(+ 4 5))
 We can also run the tests under Vicare as:
 
 ```
-$ vicare --more-file-extensions --search-path ../nanopass-framework --search-path .
+$ vicare --more-file-extensions \
+--search-path ../nanopass-framework-scheme \
+--search-path .
 Vicare Scheme version 0.3d1, 64-bit
 Revision no-branch/no-commit
 Build 2013-10-15
