@@ -2214,7 +2214,7 @@
              (let ([x (car xb*)] [e (car e*)])
                (nanopass-case (L8 Expr) e
                  [(lambda (,x* ...) ,abody)
-                  (guard (not (memq x e*)))
+                  (guard (not (memq x a*)))
                   (loop (cdr xb*) (cdr e*) (cons x xl*) (cons e el*) xo* eo*)]
                  [else (loop (cdr xb*) (cdr e*) xl* el*
                          (cons x xo*) (cons e eo*))]))))]))

@@ -78,7 +78,10 @@
              [z (lambda (x) x)])
       (set! z (lambda (x) (+ x x)))
       (set! m (+ m m))
-      (+ (+ (+ (f z a) (f z b)) (f z c)) (g z))))
+      (+ (+ (+ (f z a) (f z b)) (f z c)) (g z)))
+    (let ([f (lambda (x y) (* x y))])
+      (set! f (lambda (x y) (+ x y)))
+      (f 5 3)))
 
   (define run-tests
     (lambda ()
