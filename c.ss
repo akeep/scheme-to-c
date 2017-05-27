@@ -2717,7 +2717,7 @@
        (error who "unexpected primitive found" pr)])
     (Predicate : Expr (e) -> Predicate ()
       [(quote ,c) (if c `(true) `(false))]
-      [,x `(if (primcall eq? ,x (quote #f)) (false) (true))]
+      [,x `(if (primcall eq? x (quote #f)) (false) (true))]
       [(if ,[p0] ,[p1] ,[p2])
        (nanopass-case (L16 Predicate) p0
          [(true) p1]
