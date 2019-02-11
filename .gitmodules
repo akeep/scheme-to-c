@@ -1,0 +1,3 @@
+[submodule "nanopass-framework-scheme"]
+	path = nanopass-framework-scheme
+	url = https://github.com/nanopass/nanopass-framework-scheme.git

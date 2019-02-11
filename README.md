@@ -40,12 +40,14 @@ documentaton at http://cisco.github.io/ChezScheme/.
 
 Running on Chez Scheme
 -----------------------
-In the `scheme-to-c` directory start `scheme` using the `--libdirs` command
-line switch to tell `scheme` where to find the `nanopass-framework-scheme`
-directory:
+
+In the `scheme-to-c` directory there is Makefile that can be used with the `make`
+utility. Use `make init` to enter a new shell with the correct environment variable
+set. Then type `scheme` to enter chez scheme REPL:
 
 ```scheme
-$ scheme --libdirs .:<path to nanopass-framework-scheme>
+$ make init
+$ scheme
 Chez Scheme Version 9.4.1
 Copyright 1984-2016 Cisco Systems, Inc.
 
@@ -57,21 +59,7 @@ Copyright 1984-2016 Cisco Systems, Inc.
 You can run the tests as:
 
 ```scheme
-$ scheme --libdirs .:<path to nanopass-framework-scheme>
-Chez Scheme Version 9.4.1
-Copyright 1984-2016 Cisco Systems, Inc.
-
-> (import (tests))
-> (run-tests)
-running test 0:
-0
-passed
-running test 1:
--5
-passed
-  .
-  .
-  .
+$ make check
 ```
 
 Getting Ikarus
