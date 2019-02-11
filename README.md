@@ -91,7 +91,7 @@ compiler.  This can be done with an environment variable, but I generally find
 it easier to do this on the `ikarus` REPL as follows:
 
 ```
-$ ikarus 
+$ ikarus
 Ikarus Scheme version 0.0.4-rc1+, 64-bit (revision 1870, build 2013-10-16)
 Copyright (c) 2006-2009 Abdulaziz Ghuloum
 
@@ -104,7 +104,7 @@ Copyright (c) 2006-2009 Abdulaziz Ghuloum
 You can also run the tests through `ikarus` as follows:
 
 ```
-$ ikarus 
+$ ikarus
 Ikarus Scheme version 0.0.4-rc1+, 64-bit (revision 1870, build 2013-10-16)
 Copyright (c) 2006-2009 Abdulaziz Ghuloum
 
