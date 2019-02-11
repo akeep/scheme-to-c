@@ -44,7 +44,7 @@ In the `scheme-to-c` directory start `scheme` using the `--libdirs` command
 line switch to tell `scheme` where to find the `nanopass-framework-scheme`
 directory:
 
-```
+```scheme
 $ scheme --libdirs .:<path to nanopass-framework-scheme>
 Chez Scheme Version 9.4.1
 Copyright 1984-2016 Cisco Systems, Inc.
@@ -56,7 +56,7 @@ Copyright 1984-2016 Cisco Systems, Inc.
 
 You can run the tests as:
 
-```
+```scheme
 $ scheme --libdirs .:<path to nanopass-framework-scheme>
 Chez Scheme Version 9.4.1
 Copyright 1984-2016 Cisco Systems, Inc.
@@ -90,7 +90,7 @@ When running on `ikarus` you will also need to add the
 compiler.  This can be done with an environment variable, but I generally find
 it easier to do this on the `ikarus` REPL as follows:
 
-```
+```scheme
 $ ikarus
 Ikarus Scheme version 0.0.4-rc1+, 64-bit (revision 1870, build 2013-10-16)
 Copyright (c) 2006-2009 Abdulaziz Ghuloum
@@ -103,7 +103,7 @@ Copyright (c) 2006-2009 Abdulaziz Ghuloum
 
 You can also run the tests through `ikarus` as follows:
 
-```
+```scheme
 $ ikarus
 Ikarus Scheme version 0.0.4-rc1+, 64-bit (revision 1870, build 2013-10-16)
 Copyright (c) 2006-2009 Abdulaziz Ghuloum
@@ -140,7 +140,7 @@ we can use the `--more-file-extensions` and two calls to the `--search-path`
 command line flag, one to search in the `nanopass-framework-scheme` directory
 and one in the current directory, `.`, which is otherwise not included.
 
-```
+```scheme
 $ vicare --more-file-extensions \
 --search-path ../nanopass-framework-scheme \
 --search-path .
@@ -158,7 +158,7 @@ vicare> (my-tiny-compile '(+ 4 5))
 
 We can also run the tests under Vicare as:
 
-```
+```scheme
 $ vicare --more-file-extensions \
 --search-path ../nanopass-framework-scheme \
 --search-path .
