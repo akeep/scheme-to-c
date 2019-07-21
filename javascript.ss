@@ -553,6 +553,11 @@
   (define-language L5
     (extends L4)
     (Expr (e body)
+          (- (begin e* ... e))))
+
+  (define-language L6
+    (extends L5)
+    (Expr (e body)
       (- (let ([x* e*] ...) body))))
 
   ;;;;;;;;;
@@ -959,12 +964,21 @@
                 (begin [set! ,x* ,e*] ...
                        ,body)))]))
 
-(trace-define-pass let-as-lambda : L4 (e) -> L5 ()
-    (Expr : Expr (e) -> Expr ()
-          [(let ([,x* ,[e*]] ...) ,[body])
-           `((lambda (,x* ...) ,body) ,e* ...)]))
+(trace-define-pass
+ begin-as-let : L4 (e) -> L5 ()
+ (Expr : Expr (e) -> Expr ()
+       [(begin ,[e*] ... ,[e])
+        `(let ((,(make-tmp) ,e*))
+           ...
+           ,e)]))
 
-(trace-define-pass cps : L5 (e) -> L5 ()
+
+(trace-define-pass let-as-lambda : L5 (e) -> L6 ()
+                   (Expr : Expr (e) -> Expr ()
+                         [(let ([,x* ,[e*]] ...) ,[body])
+                          `((lambda (,x* ...) ,body) ,e* ...)]))
+
+(trace-define-pass cps : L6 (e) -> L6 ()
     (Expr : Expr (e) -> Expr ()
           [(if ,[e0] ,[e1] ,[e2])
            `(lambda (k)
@@ -977,15 +991,6 @@
            `(lambda (k)
               (set! ,x ,e)
               (k (void)))]
-          [(begin ,[e*] ... ,[e])
-           (pk '!!!!!!!)
-           `(lambda (k)
-              ,(let f ((e* e*))
-                 ;; the continuation of expressions that are in the
-                 ;; `begin` form are thrown away except the last.
-                 (if (null? e*)
-                     `(,e k) ;; return the result of the last expression
-                     `(,(car e*) (lambda (,(make-tmp)) ,(f (cdr e*)))))))]
           [(lambda (,x* ...) ,[body])
            `(lambda (k)
               `lambda-definition
@@ -1013,9 +1018,10 @@
     (remove-and-or-not unparse-L2)
     (make-begin-explicit unparse-L3)
     (letrec-as-let-and-set unparse-L4)
-    (let-as-lambda unparse-L5)
-    (cps unparse-L5)
-    (lambda (x) (unparse-L5 x)))
+    (begin-as-let unparse-L5)
+    (let-as-lambda unparse-L6)
+    (cps unparse-L6)
+    (lambda (x) (unparse-L6 x)))
 
 ;; (define program
 ;;    '(letrec ((input 42)
