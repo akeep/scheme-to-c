@@ -233,7 +233,7 @@
 
   ;;; user value primitives that perform allocation
   (define user-alloc-value-prims
-    '((cons . 2) (make-vector . 1) (box . 1)))
+    '((times . 2) (add . 2) (cons . 2) (make-vector . 1) (box . 1)))
 
   ;;; user value primitives that do not perform allocation
   (define user-non-alloc-value-prims
@@ -964,8 +964,49 @@
           [(let ([,x* ,[e*]] ...) ,[body])
            `((lambda (,x* ...) ,body) ,e* ...)]))
 
+(trace-define-pass cps : L5 (e) -> L5 ()
+    (Expr : Expr (e) -> Expr ()
+          [(if ,[e0] ,[e1] ,[e2])
+           `(lambda (k)
+              (,e0
+               (lambda (b)
+                 (if b
+                     (,e1 k)
+                     (,e2 k)))))]
+          [(set! ,x ,[e])
+           `(lambda (k)
+              (set! ,x ,e)
+              (k (void)))]
+          [(begin ,[e*] ... ,[e])
+           (pk '!!!!!!!)
+           `(lambda (k)
+              ,(let f ((e* e*))
+                 ;; the continuation of expressions that are in the
+                 ;; `begin` form are thrown away except the last.
+                 (if (null? e*)
+                     `(,e k) ;; return the result of the last expression
+                     `(,(car e*) (lambda (,(make-tmp)) ,(f (cdr e*)))))))]
+          [(lambda (,x* ...) ,[body])
+           `(lambda (k)
+              `lambda-definition
+              (k (lambda (ky ,x* ...) ,(if (symbol? body) `(ky ,body) `(,body ky)))))]
+          [(quote ,d) `(lambda (k) (k ,d))]
+          ;; primitive application
+          [(,pr ,[e*] ...)
+           `(lambda (k)
+              (k (,pr ,e* ...)))]
+          ;; lambda application
+          [(,[e0] ,[e*] ...)
+           `(lambda (k)
+              `lambda-application
+              (,e0 (lambda (a)
+                     (a k (,e* (lambda (kk) kk)) ...))))]))
+
+
+
+
   ;;; the definition of our compiler that pulls in all of our passes and runs
-  ;;; them in sequence checking to see if the programmer wants them traced.
+  ;;; them in sequence checking to sexe if the programmer wants them traced.
   (define-compiler my-tiny-compile
     (parse-and-rename unparse-Lsrc)
     (remove-one-armed-if unparse-L1)
@@ -973,18 +1014,41 @@
     (make-begin-explicit unparse-L3)
     (letrec-as-let-and-set unparse-L4)
     (let-as-lambda unparse-L5)
+    (cps unparse-L5)
     (lambda (x) (unparse-L5 x)))
 
+;; (define program
+;;    '(letrec ((input 42)
+;;              (odd? (lambda (x) (not (even? x))))
+;;              (even? (lambda (x) (if (= x 0) #t (not (odd? (- x 1)))))))
+;;       (odd? input)))
+
+(define program `(letrec ((abc '42))
+                   abc))
+
+;; (define program
+;;   '(let ((abc '42)
+;;          (def '101))
+;;      '1337
+;;      (add abc (times def '100))))
+
+;; (pk 'scheme (eval program))
+
+(define add (lambda (a b)
+              (pk 'add a b)
+              (+ a b)))
+
+(define times (lambda (a b)
+                (pk 'times a b)
+                (* a b)))
 
 (define program
-   '(letrec ((input 42)
-             (odd? (lambda (x) (not (even? x))))
-             (even? (lambda (x) (if (= x 0) #t (not (odd? (- x 1)))))))
-      (odd? input)))
+  '(let ((square (lambda (value) (times value value))))
+     (square '1337)))
 
-;; (define program `(letrec ((abc 42))
-;;                    abc))
+(define program
+  `(let ((XXX '10)
+         (YYY '20))
+     (add XXX (times YYY '3))))
 
-(pk 'scheme (eval program))
-
-(pk 'compiled (eval (my-tiny-compile program)))
+(pk 'compiled ((eval (my-tiny-compile program)) pk))
