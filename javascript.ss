@@ -957,8 +957,10 @@
   (trace-define-pass letrec-as-let-and-set : L3 (e) -> L4 ()
     (Expr : Expr (e) -> Expr ()
           [(letrec ([,x ,[e]]) ,[body])
-           `(let ((,x ,e))
-              ,body)]
+           `(let ((,x (void)))
+              (begin
+                (set! ,x ,e)
+                ,body))]
           [(letrec ([,x* ,[e*]] ...) ,[body])
            (let ((void* (map (lambda _ `(void)) x*)))
              `(let ([,x* ,void*] ...)
@@ -999,7 +1001,7 @@
        ;; primitive application
        [(,pr ,[e*] ...)
         `(lambda (k)
-           (k (,pr (,e* (lambda (return) return)) ...)))]
+           (k (,pr (trampoline (,e* (lambda (return) return))) ...)))]
        ;; lambda application
        [(,[e] ,[e*] ...)
         `(lambda (k)
@@ -1036,11 +1038,11 @@
 ;; (define program `(letrec ((abc '42))
 ;;                    abc))
 
-(define program
-   '(letrec ((input '42)
-             (odd? (lambda (x) (if (eq? x '0) '#f (even? (+ x '-1)))))
-             (even? (lambda (x) (if (eq? x '0) '#t (odd? (+ x '-1))))))
-      (odd? input)))
+;; (define program
+;;    '(letrec ((input '42)
+;;              (odd? (lambda (x) (if (eq? x '0) '#f (even? (+ x '-1)))))
+;;              (even? (lambda (x) (if (eq? x '0) '#t (odd? (+ x '-1))))))
+;;       (odd? input)))
 
 
 (define add (lambda (a b)
@@ -1051,13 +1053,25 @@
                 (pk 'times a b)
                 (* a b)))
 
+(define program
+  '(let ((abc '42)
+         (def '101))
+     ((lambda (x) (- x '1)) (+ abc (* def '100)))))
+
 ;; (define program
-;;   '(let ((abc '42)
-;;          (def '101))
-;;      (+ abc (* def '100))))
+;;   '(letrec ((fact (lambda (n) (if (eq? n '0) '1 (times n (fact (- n '1)))))))
+;;      (fact '7)))
+
+;; (define program
+;;   '(letrec ((fib (lambda (n)
+;;                    (if (<= n '2)
+;;                        '1
+;;                        (+ (fib (- n '1)) (fib (- n '2)))))))
+;;      (fib '15)))
+
 
 (define (trampoline thunk)
-;;  (pk thunk)
+;;  (pk 'trampoline thunk)
   (if (procedure? thunk)
       (trampoline (thunk))
       thunk))
