@@ -1033,14 +1033,15 @@
 ;; (define program
 ;;   `(add '10 (times '20 '2)))
 
+;; (define program `(letrec ((abc '42))
+;;                    abc))
+
 (define program
    '(letrec ((input '42)
              (odd? (lambda (x) (if (eq? x '0) '#f (even? (+ x '-1)))))
              (even? (lambda (x) (if (eq? x '0) '#t (odd? (+ x '-1))))))
       (odd? input)))
 
-;; (define program `(letrec ((abc '42))
-;;                    abc))
 
 (define add (lambda (a b)
               (pk 'add a b)
