@@ -981,7 +981,7 @@
                           `((lambda (,x* ...) ,body) ,e* ...)]))
 
 (trace-define-pass
- cps : L6 (e) -> L6 ()
+ cps-trampoline : L6 (e) -> L6 ()
  (Expr : Expr (e) -> Expr ()
        ;; if branch
        [(if ,[e0] ,[e1] ,[e2])
@@ -989,13 +989,13 @@
            (,e0
             (lambda (kif)
               (if kif
-                  (,e1 k)
-                  (,e2 k)))))]
+                  (lambda () (,e1 k))
+                  (lambda () (,e2 k))))))]
        ;; lambda creation
        [(lambda (,x* ...) ,[body])
         `(lambda (k)
            (k (lambda (kk ,x* ...)
-                (,body kk))))]
+                (lambda () (,body kk)))))]
        ;; primitive application
        [(,pr ,[e*] ...)
         `(lambda (k)
@@ -1003,7 +1003,7 @@
        ;; lambda application
        [(,[e] ,[e*] ...)
         `(lambda (k)
-           ((,e (lambda (return) return)) k ,e* ...))]
+           (lambda () ((,e (lambda (return) return)) k ,e* ...)))]
        [(quote ,d) `(lambda (k) (k ,d))]))
 
   ;;; the definition of our compiler that pulls in all of our passes and runs
@@ -1016,7 +1016,7 @@
     (letrec-as-let-and-set unparse-L4)
     (begin-as-let unparse-L5)
     (let-as-lambda unparse-L6)
-    (cps unparse-L6)
+    (cps-trampoline unparse-L6)
     (lambda (x) (unparse-L6 x)))
 
 ;; (pk 'scheme (eval program))
@@ -1056,4 +1056,10 @@
 ;;          (def '101))
 ;;      (+ abc (* def '100))))
 
-(pk 'compiled  ((eval (my-tiny-compile program)) pk))
+(define (trampoline thunk)
+;;  (pk thunk)
+  (if (procedure? thunk)
+      (trampoline (thunk))
+      thunk))
+
+(trampoline (lambda () ((eval (my-tiny-compile program)) pk)))
