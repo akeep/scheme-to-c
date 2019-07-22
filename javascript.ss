@@ -998,14 +998,18 @@
           [(quote ,d) `(lambda (k) (k ,d))]
           ;; primitive application
           [(,pr ,[e*] ...)
-           `(lambda (k)
-              (k (,pr ,e* ...)))]
+              (let ((t (make-tmp)))
+                `(lambda (k)
+                   (let ((,t (,pr (,e* (lambda (ko) ko)) ...)))
+                     (k (lambda (kd) (kd ,t))))))]
           ;; lambda application
           [(,[e0] ,[e*] ...)
-           `(lambda (k)
-              `lambda-application
-              (,e0 (lambda (a)
-                     (a k (,e* (lambda (kk) kk)) ...))))]))
+           (let ((t (make-tmp)))
+             `(lambda (k)
+                `lambda-application
+                (,e0 (lambda (a)
+                       (let ((,t (a k (,e* (lambda (kk) kk)) ...)))
+                         (lambda (kx) (kx ,t)))))))]))
 
 
 
@@ -1053,8 +1057,9 @@
      (square '1337)))
 
 (define program
-  `(let ((XXX '10)
-         (YYY '20))
-     (add XXX (times YYY '3))))
+  `(add '100 (times '200 '3)))
+
+;; (define program
+;;   `(add '10 (times '20 '2)))
 
 (pk 'compiled ((eval (my-tiny-compile program)) pk))
