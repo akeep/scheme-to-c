@@ -99,6 +99,7 @@
 
 
 (define (pk . args)
+  (display ";;; ")
   (display args)(newline)
   (car (reverse args)))
 
@@ -820,15 +821,15 @@
   (define-pass remove-and-or-not : L1 (e) -> L2 ()
     (Expr : Expr (e) -> Expr ()
       [(if (not ,[e0]) ,[e1] ,[e2]) `(if ,e0 ,e2 ,e1)]
-      [(not ,[e0]) `(if ,e0 #f #t)]
-      [(and) #t]
+      [(not ,[e0]) `(if ,e0 '#f '#t)]
+      [(and) '#t]
       [(and ,[e] ,[e*] ...)
        ;; tiny inline loop (not tail recursive, so called f instead of loop)
        (let f ([e e] [e* e*])
          (if (null? e*)
              e
-             `(if ,e ,(f (car e*) (cdr e*)) #f)))]
-      [(or) #f]
+             `(if ,e ,(f (car e*) (cdr e*)) '#f)))]
+      [(or) '#f]
       [(or ,[e] ,[e*] ...)
        ;; tiny inline loop (not tail recursive, so called f instead of loop)
        (let f ([e e] [e* e*])
@@ -968,51 +969,42 @@
  begin-as-let : L4 (e) -> L5 ()
  (Expr : Expr (e) -> Expr ()
        [(begin ,[e*] ... ,[e])
-        `(let ((,(make-tmp) ,e*))
-           ...
-           ,e)]))
-
+        (let f ((e* e*))
+          (if (null? e*)
+              e
+              `(let ((,(make-tmp) ,(car e*)))
+                 ,(f (cdr e*)))))]))
 
 (trace-define-pass let-as-lambda : L5 (e) -> L6 ()
                    (Expr : Expr (e) -> Expr ()
                          [(let ([,x* ,[e*]] ...) ,[body])
                           `((lambda (,x* ...) ,body) ,e* ...)]))
 
-(trace-define-pass cps : L6 (e) -> L6 ()
-    (Expr : Expr (e) -> Expr ()
-          [(if ,[e0] ,[e1] ,[e2])
-           `(lambda (k)
-              (,e0
-               (lambda (b)
-                 (if b
-                     (,e1 k)
-                     (,e2 k)))))]
-          [(set! ,x ,[e])
-           `(lambda (k)
-              (set! ,x ,e)
-              (k (void)))]
-          [(lambda (,x* ...) ,[body])
-           `(lambda (k)
-              `lambda-definition
-              (k (lambda (ky ,x* ...) ,(if (symbol? body) `(ky ,body) `(,body ky)))))]
-          [(quote ,d) `(lambda (k) (k ,d))]
-          ;; primitive application
-          [(,pr ,[e*] ...)
-              (let ((t (make-tmp)))
-                `(lambda (k)
-                   (let ((,t (,pr (,e* (lambda (ko) ko)) ...)))
-                     (k (lambda (kd) (kd ,t))))))]
-          ;; lambda application
-          [(,[e0] ,[e*] ...)
-           (let ((t (make-tmp)))
-             `(lambda (k)
-                `lambda-application
-                (,e0 (lambda (a)
-                       (let ((,t (a k (,e* (lambda (kk) kk)) ...)))
-                         (lambda (kx) (kx ,t)))))))]))
-
-
-
+(trace-define-pass
+ cps : L6 (e) -> L6 ()
+ (Expr : Expr (e) -> Expr ()
+       ;; if branch
+       [(if ,[e0] ,[e1] ,[e2])
+        `(lambda (k)
+           (,e0
+            (lambda (kif)
+              (if kif
+                  (,e1 k)
+                  (,e2 k)))))]
+       ;; lambda creation
+       [(lambda (,x* ...) ,[body])
+        `(lambda (k)
+           (k (lambda (kk ,x* ...)
+                (,body kk))))]
+       ;; primitive application
+       [(,pr ,[e*] ...)
+        `(lambda (k)
+           (k (,pr (,e* (lambda (return) return)) ...)))]
+       ;; lambda application
+       [(,[e] ,[e*] ...)
+        `(lambda (k)
+           ((,e (lambda (return) return)) k ,e* ...))]
+       [(quote ,d) `(lambda (k) (k ,d))]))
 
   ;;; the definition of our compiler that pulls in all of our passes and runs
   ;;; them in sequence checking to sexe if the programmer wants them traced.
@@ -1027,22 +1019,28 @@
     (cps unparse-L6)
     (lambda (x) (unparse-L6 x)))
 
-;; (define program
-;;    '(letrec ((input 42)
-;;              (odd? (lambda (x) (not (even? x))))
-;;              (even? (lambda (x) (if (= x 0) #t (not (odd? (- x 1)))))))
-;;       (odd? input)))
-
-(define program `(letrec ((abc '42))
-                   abc))
-
-;; (define program
-;;   '(let ((abc '42)
-;;          (def '101))
-;;      '1337
-;;      (add abc (times def '100))))
-
 ;; (pk 'scheme (eval program))
+
+;; (define program
+;;   '(let ((square (lambda (value) (times value value))))
+;;      (square '1337)))
+
+;; (define program
+;;   `((lambda (XXX YYY)
+;;       (add XXX YYY))
+;;     '100 '200))
+
+;; (define program
+;;   `(add '10 (times '20 '2)))
+
+(define program
+   '(letrec ((input '42)
+             (odd? (lambda (x) (if (eq? x '0) '#f (even? (+ x '-1)))))
+             (even? (lambda (x) (if (eq? x '0) '#t (odd? (+ x '-1))))))
+      (odd? input)))
+
+;; (define program `(letrec ((abc '42))
+;;                    abc))
 
 (define add (lambda (a b)
               (pk 'add a b)
@@ -1052,14 +1050,9 @@
                 (pk 'times a b)
                 (* a b)))
 
-(define program
-  '(let ((square (lambda (value) (times value value))))
-     (square '1337)))
-
-(define program
-  `(add '100 (times '200 '3)))
-
 ;; (define program
-;;   `(add '10 (times '20 '2)))
+;;   '(let ((abc '42)
+;;          (def '101))
+;;      (+ abc (* def '100))))
 
-(pk 'compiled ((eval (my-tiny-compile program)) pk))
+(pk 'compiled  ((eval (my-tiny-compile program)) pk))
