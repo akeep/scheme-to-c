@@ -581,7 +581,7 @@
   ;;; since these simple passes are a gentle introduction to how the passes are
   ;;; written.
   ;;;
-  (trace-define-pass parse-and-rename : * (e) -> Lsrc ()
+  (define-pass parse-and-rename : * (e) -> Lsrc ()
     ;;; Helper functions for this pass.
     (definitions
       ;;; process-body - used to process the body of begin, let, letrec, and
@@ -793,7 +793,7 @@
   ;;; Design descision: kept seperate from parse-and-rename to make it easier
   ;;; to understand how the nanopass framework can be used.
   ;;;
-  (trace-define-pass remove-one-armed-if : Lsrc (e) -> L1 ()
+  (define-pass remove-one-armed-if : Lsrc (e) -> L1 ()
     (Expr : Expr (e) -> Expr ()
       [(if ,[e0] ,[e1]) `(if ,e0 ,e1 (void))]))
 
@@ -954,7 +954,7 @@
 				     (cdr unparser*))))))))))])))
 
 
-  (trace-define-pass letrec-as-let-and-set : L3 (e) -> L4 ()
+  (define-pass letrec-as-let-and-set : L3 (e) -> L4 ()
     (Expr : Expr (e) -> Expr ()
           [(letrec ([,x ,[e]]) ,[body])
            `(let ((,x (void)))
@@ -967,7 +967,7 @@
                 (begin [set! ,x* ,e*] ...
                        ,body)))]))
 
-(trace-define-pass
+(define-pass
  begin-as-let : L4 (e) -> L5 ()
  (Expr : Expr (e) -> Expr ()
        [(begin ,[e*] ... ,[e])
@@ -977,12 +977,12 @@
               `(let ((,(make-tmp) ,(car e*)))
                  ,(f (cdr e*)))))]))
 
-(trace-define-pass let-as-lambda : L5 (e) -> L6 ()
+(define-pass let-as-lambda : L5 (e) -> L6 ()
                    (Expr : Expr (e) -> Expr ()
                          [(let ([,x* ,[e*]] ...) ,[body])
                           `((lambda (,x* ...) ,body) ,e* ...)]))
 
-(trace-define-pass
+(define-pass
  cps-trampoline : L6 (e) -> L6 ()
  (Expr : Expr (e) -> Expr ()
        ;; if branch
@@ -1008,20 +1008,76 @@
            (lambda () ((,e (lambda (return) return)) k ,e* ...)))]
        [(quote ,d) `(lambda (k) (k ,d))]))
 
-  ;;; the definition of our compiler that pulls in all of our passes and runs
-  ;;; them in sequence checking to sexe if the programmer wants them traced.
-  (define-compiler my-tiny-compile
-    (parse-and-rename unparse-Lsrc)
-    (remove-one-armed-if unparse-L1)
-    (remove-and-or-not unparse-L2)
-    (make-begin-explicit unparse-L3)
-    (letrec-as-let-and-set unparse-L4)
-    (begin-as-let unparse-L5)
-    (let-as-lambda unparse-L6)
-    (cps-trampoline unparse-L6)
-    (lambda (x) (unparse-L6 x)))
+;; (define-pass generate-javascript : L6 (e) -> * ()
+;;   (definitions
+;;     (define string-join
+;;       (lambda (str* jstr)
+;;         (cond
+;;          [(null? str*) ""]
+;;          [(null? (cdr str*)) (car str*)]
+;;          [else (string-append (car str*) jstr (string-join (cdr str*) jstr))])))
+
+;;     ;; symbol->c-id - converts any Scheme symbol into a valid C identifier.
+;;     (define symbol->c-id
+;;       (lambda (sym)
+;;         (let ([ls (string->list (symbol->string sym))])
+;;           (if (null? ls)
+;;               "_"
+;;               (let ([fst (car ls)])
+;;                 (list->string
+;;                  (cons
+;;                   (if (char-alphabetic? fst) fst #\_)
+;;                   (map (lambda (c)
+;;                          (if (or (char-alphabetic? c)
+;;                                  (char-numeric? c))
+;;                              c
+;;                              #\_))
+;;                        (cdr ls)))))))))
+
+;;     (define format-set!
+;;       (lambda (x rhs)
+;;         (format "~a = ~a" (symbol->c-id x) rhs))))
+
+;;   (Expr : Expr (e) -> * ()
+;;         [(if ,[e0] ,[e1] ,[e2])
+;;          (format "if (~a) {\n~a\n} else {\n~a}" e0 e1 e2)]
+
+;;         [(lambda (,x* ...) ,[body])
+;;          (format "function(~a) {\n~a\n}"
+;;                  (string-join (map symbol->c-id x*) ", ")
+;;                  body)]
+
+;;         ;; primitive application
+;;         [(,pr ,[e*] ...)
+;;          (format "~a(~a)"
+;;                  pr
+;;                  (string-join e* ", "))]
+
+;;         ;; lambda application
+;;         [(,[e] ,[e*] ...)
+;;          (format "~a(~a)"
+;;                  e
+;;                  (string-join e* ", "))]
+;;         [e e]))
+
+;; the definition of our compiler that pulls in all of our passes and runs
+;; them in sequence checking to sexe if the programmer wants them traced.
+(define-compiler my-tiny-compile
+  (parse-and-rename unparse-Lsrc)
+  (remove-one-armed-if unparse-L1)
+  (remove-and-or-not unparse-L2)
+  (make-begin-explicit unparse-L3)
+  (letrec-as-let-and-set unparse-L4)
+  (begin-as-let unparse-L5)
+  (let-as-lambda unparse-L6)
+  (cps-trampoline unparse-L6)
+  unparse-L6)
+
 
 ;; (pk 'scheme (eval program))
+
+(define program
+  '(add '1 '2))
 
 ;; (define program
 ;;   '(let ((square (lambda (value) (times value value))))
@@ -1053,10 +1109,10 @@
                 (pk 'times a b)
                 (* a b)))
 
-(define program
-  '(let ((abc '42)
-         (def '101))
-     ((lambda (x) (- x '1)) (+ abc (* def '100)))))
+;; (define program
+;;   '(let ((abc '42)
+;;          (def '101))
+;;      ((lambda (x) (- x '1)) (+ abc (* def '100)))))
 
 ;; (define program
 ;;   '(letrec ((fact (lambda (n) (if (eq? n '0) '1 (times n (fact (- n '1)))))))
@@ -1076,4 +1132,9 @@
       (trampoline (thunk))
       thunk))
 
-(trampoline (lambda () ((eval (my-tiny-compile program)) pk)))
+(define compiled (my-tiny-compile program))
+
+(define out (pk (eval compiled)))
+
+
+(trampoline (lambda () (out pk)))
