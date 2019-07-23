@@ -99,8 +99,8 @@
 
 
 (define (pk . args)
-  (display ";;; ")
-  (display args)(newline)
+  (display ";;; " (current-error-port))
+  (display args (current-error-port))(newline (current-error-port))
   (car (reverse args)))
 
   ;;; Representation of our data types.
@@ -1001,67 +1001,12 @@
        ;; primitive application
        [(,pr ,[e*] ...)
         `(lambda (k)
-           (k (,pr (trampoline (,e* (lambda (return) return))) ...)))]
+           (k (,pr (trampoline (,e* (lambda (returnx) returnx))) ...)))]
        ;; lambda application
        [(,[e] ,[e*] ...)
         `(lambda (k)
-           (lambda () ((,e (lambda (return) return)) k ,e* ...)))]
+           (lambda () ((,e (lambda (returnx) returnx)) k ,e* ...)))]
        [(quote ,d) `(lambda (k) (k ,d))]))
-
-(define-pass generate-javascript : L6 (e) -> * ()
-  (definitions
-    (define string-join
-      (lambda (str* jstr)
-        (cond
-         [(null? str*) ""]
-         [(null? (cdr str*)) (car str*)]
-         [else (string-append (car str*) jstr (string-join (cdr str*) jstr))])))
-
-    ;; symbol->c-id - converts any Scheme symbol into a valid C identifier.
-    (define symbol->c-id
-      (lambda (sym)
-        (let ([ls (string->list (symbol->string sym))])
-          (if (null? ls)
-              "_"
-              (let ([fst (car ls)])
-                (list->string
-                 (cons
-                  (if (char-alphabetic? fst) fst #\_)
-                  (map (lambda (c)
-                         (if (or (char-alphabetic? c)
-                                 (char-numeric? c))
-                             c
-                             #\_))
-                       (cdr ls)))))))))
-
-    (define format-set!
-      (lambda (x rhs)
-        (format "~a = ~a" (symbol->c-id x) rhs))))
-
-  (Expr : Expr (e) -> * ()
-        [(if ,[e0] ,[e1] ,[e2])
-         (format "if (~a) {\n~a\n} else {\n~a}" e0 e1 e2)]
-
-        [(set! ,x ,[e])
-         (format-set! x e)]
-
-        [(lambda (,x* ...) ,[body])
-         (format "function(~a) {\n~a\n}"
-                 (string-join (map symbol->c-id x*) ", ")
-                 body)]
-
-        ;; primitive application
-        [(,pr ,[e*] ...)
-         (format "~a(~a)"
-                 pr
-                 (string-join e* ", "))]
-
-        ;; lambda application
-        [(,[e] ,[e*] ...)
-         (format "~a(~a)"
-                 e
-                 (string-join e* ", "))]
-        [pr pr]))
 
 ;; the definition of our compiler that pulls in all of our passes and runs
 ;; them in sequence checking to sexe if the programmer wants them traced.
@@ -1074,10 +1019,10 @@
   (begin-as-let unparse-L5)
   (let-as-lambda unparse-L6)
   (cps-trampoline unparse-L6)
-  generate-javascript)
+  unparse-L6)
 
-(define program
-  '(add '1 '2))
+;; (define program
+;;   '(add '1 '2))
 
 ;; (define program
 ;;   '(let ((square (lambda (value) (times value value))))
@@ -1102,11 +1047,11 @@
 
 
 (define add (lambda (a b)
-              (pk 'add a b)
+              ;; (pk 'add a b)
               (+ a b)))
 
 (define times (lambda (a b)
-                (pk 'times a b)
+                ;; (pk 'times a b)
                 (* a b)))
 
 ;; (define program
@@ -1114,9 +1059,9 @@
 ;;          (def '101))
 ;;      ((lambda (x) (- x '1)) (+ abc (* def '100)))))
 
-;; (define program
-;;   '(letrec ((fact (lambda (n) (if (eq? n '0) '1 (times n (fact (- n '1)))))))
-;;      (fact '7)))
+(define program
+  '(letrec ((fact (lambda (n) (if (eq? n '0) '1 (times n (fact (add n '-1)))))))
+     (fact '15170)))
 
 ;; (define program
 ;;   '(letrec ((fib (lambda (n)
@@ -1126,6 +1071,9 @@
 ;;      (fib '15)))
 
 
+;; (define program
+;;   '(if '1 '42 '0))
+
 (define (trampoline thunk)
 ;;  (pk 'trampoline thunk)
   (if (procedure? thunk)
@@ -1134,7 +1082,88 @@
 
 (define compiled (my-tiny-compile program))
 
+(define string-join
+  (lambda (str* jstr)
+    (cond
+     [(null? str*) ""]
+     [(null? (cdr str*)) (car str*)]
+     [else (string-append (car str*) jstr (string-join (cdr str*) jstr))])))
+
+;; symbol->c-id - converts any Scheme symbol into a valid C identifier.
+(define symbol->c-id
+  (lambda (sym)
+    (let ([ls (string->list (symbol->string sym))])
+      (if (null? ls)
+          "_"
+          (let ([fst (car ls)])
+            (list->string
+             (cons
+              (if (char-alphabetic? fst) fst #\_)
+              (map (lambda (c)
+                     (if (or (char-alphabetic? c)
+                             (char-numeric? c))
+                         c
+                         #\_))
+                   (cdr ls)))))))))
+
+(define (emit-args x)
+  (string-join (map symbol->c-id x) ", "))
+
+(define (emit x)
+  (cond
+    [(number? x) (number->string x)]
+    [(string? x) x]
+    [(symbol? x) (symbol->c-id x)]
+
+    ;; (void)
+    [(and (pair? x) (eq? (car x) 'void))
+     "undefined"]
+
+    ;; (eq? a b)
+    [(and (pair? x) (eq? (car x) 'eq?))
+     (string-append (emit (cadr x)) " === " (emit (caddr x)))]
+
+    ;; (set! x e)
+    [(and (pair? x) (eq? (car x) 'set!))
+     (string-append (emit (cadr x)) " = " (emit (caddr x)))]
+
+    ;; if
+    [(and (pair? x) (eq? (car x) 'if))
+     (string-join
+      (append (list "/* if */ "
+                    (emit (cadr x))
+                    " ? "
+                    (emit (caddr x))
+                    " : "
+                    (emit (cadddr x))
+                    ""))
+      "")]
+    ;; function definition
+    [(and (pair? x) (eq? (car x) 'lambda))
+     (string-join
+      (append (list "(function("
+                    (emit-args (cadr x))
+                    ") { return ")
+              (map emit (cddr x))
+              (list ";})"))
+      " ")]
+    ;; function call
+    [(pair? x)
+     (string-join (list (emit (car x))
+                        "("
+                        (string-join (map emit (cdr x)) ", ")
+                        ")")
+                  " ")]
+    [else
+     (display x)(newline)
+     (error 'emit "got ~a" x)]))
+
+(pk "compiled" compiled)
+(pk "javascript output:")
+(display (emit compiled))
+(newline)
 (define out (pk (eval compiled)))
+
 
 
 (trampoline (lambda () (out pk)))
