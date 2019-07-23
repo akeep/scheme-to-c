@@ -1008,57 +1008,60 @@
            (lambda () ((,e (lambda (return) return)) k ,e* ...)))]
        [(quote ,d) `(lambda (k) (k ,d))]))
 
-;; (define-pass generate-javascript : L6 (e) -> * ()
-;;   (definitions
-;;     (define string-join
-;;       (lambda (str* jstr)
-;;         (cond
-;;          [(null? str*) ""]
-;;          [(null? (cdr str*)) (car str*)]
-;;          [else (string-append (car str*) jstr (string-join (cdr str*) jstr))])))
+(define-pass generate-javascript : L6 (e) -> * ()
+  (definitions
+    (define string-join
+      (lambda (str* jstr)
+        (cond
+         [(null? str*) ""]
+         [(null? (cdr str*)) (car str*)]
+         [else (string-append (car str*) jstr (string-join (cdr str*) jstr))])))
 
-;;     ;; symbol->c-id - converts any Scheme symbol into a valid C identifier.
-;;     (define symbol->c-id
-;;       (lambda (sym)
-;;         (let ([ls (string->list (symbol->string sym))])
-;;           (if (null? ls)
-;;               "_"
-;;               (let ([fst (car ls)])
-;;                 (list->string
-;;                  (cons
-;;                   (if (char-alphabetic? fst) fst #\_)
-;;                   (map (lambda (c)
-;;                          (if (or (char-alphabetic? c)
-;;                                  (char-numeric? c))
-;;                              c
-;;                              #\_))
-;;                        (cdr ls)))))))))
+    ;; symbol->c-id - converts any Scheme symbol into a valid C identifier.
+    (define symbol->c-id
+      (lambda (sym)
+        (let ([ls (string->list (symbol->string sym))])
+          (if (null? ls)
+              "_"
+              (let ([fst (car ls)])
+                (list->string
+                 (cons
+                  (if (char-alphabetic? fst) fst #\_)
+                  (map (lambda (c)
+                         (if (or (char-alphabetic? c)
+                                 (char-numeric? c))
+                             c
+                             #\_))
+                       (cdr ls)))))))))
 
-;;     (define format-set!
-;;       (lambda (x rhs)
-;;         (format "~a = ~a" (symbol->c-id x) rhs))))
+    (define format-set!
+      (lambda (x rhs)
+        (format "~a = ~a" (symbol->c-id x) rhs))))
 
-;;   (Expr : Expr (e) -> * ()
-;;         [(if ,[e0] ,[e1] ,[e2])
-;;          (format "if (~a) {\n~a\n} else {\n~a}" e0 e1 e2)]
+  (Expr : Expr (e) -> * ()
+        [(if ,[e0] ,[e1] ,[e2])
+         (format "if (~a) {\n~a\n} else {\n~a}" e0 e1 e2)]
 
-;;         [(lambda (,x* ...) ,[body])
-;;          (format "function(~a) {\n~a\n}"
-;;                  (string-join (map symbol->c-id x*) ", ")
-;;                  body)]
+        [(set! ,x ,[e])
+         (format-set! x e)]
 
-;;         ;; primitive application
-;;         [(,pr ,[e*] ...)
-;;          (format "~a(~a)"
-;;                  pr
-;;                  (string-join e* ", "))]
+        [(lambda (,x* ...) ,[body])
+         (format "function(~a) {\n~a\n}"
+                 (string-join (map symbol->c-id x*) ", ")
+                 body)]
 
-;;         ;; lambda application
-;;         [(,[e] ,[e*] ...)
-;;          (format "~a(~a)"
-;;                  e
-;;                  (string-join e* ", "))]
-;;         [e e]))
+        ;; primitive application
+        [(,pr ,[e*] ...)
+         (format "~a(~a)"
+                 pr
+                 (string-join e* ", "))]
+
+        ;; lambda application
+        [(,[e] ,[e*] ...)
+         (format "~a(~a)"
+                 e
+                 (string-join e* ", "))]
+        [pr pr]))
 
 ;; the definition of our compiler that pulls in all of our passes and runs
 ;; them in sequence checking to sexe if the programmer wants them traced.
@@ -1071,10 +1074,7 @@
   (begin-as-let unparse-L5)
   (let-as-lambda unparse-L6)
   (cps-trampoline unparse-L6)
-  unparse-L6)
-
-
-;; (pk 'scheme (eval program))
+  generate-javascript)
 
 (define program
   '(add '1 '2))
