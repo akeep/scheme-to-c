@@ -2813,7 +2813,7 @@
   
   ;;; pass: return-of-set! : L17 -> L18
   ;;;
-  ;;; In this psss we remove the 'let' form and replace it with set!.  While
+  ;;; In this pass we remove the 'let' form and replace it with set!.  While
   ;;; this set! looks like the source-level set!, it really is not the same
   ;;; thing, since each of our variables only ever receive one value over the
   ;;; course of running the program.  If we were compiling to assembly or LLVM,
